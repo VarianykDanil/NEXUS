@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-api"
+version = "0.1.0"
+description = "Safety-first control plane for the NEXUS autonomous engineering platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiosqlite>=0.20,<1",
+  "asyncpg>=0.29,<1",
+  "fastapi>=0.115,<1",
+  "openai>=2.34,<3",
+  "pydantic-settings>=2.6,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "uvicorn[standard]>=0.32,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1",
+  "mypy>=1.13,<2",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1.3,<2",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+nexus-api = "nexus_api.main:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["nexus_api"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true

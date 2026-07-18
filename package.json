@@ -1,0 +1,12 @@
+{
+  "name": "nexus",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev": "pnpm --filter @nexus/dashboard dev",
+    "build": "pnpm --filter @nexus/dashboard build",
+    "test": "pnpm --filter @nexus/dashboard test",
+    "typecheck": "pnpm --filter @nexus/dashboard typecheck"
+  }
+}

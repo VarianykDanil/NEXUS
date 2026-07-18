@@ -1,0 +1,13 @@
+# Keep repository text portable between Windows, macOS, Linux, and containers.
+* text=auto eol=lf
+
+# Binary assets must never receive line-ending conversion.
+*.gif binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+
