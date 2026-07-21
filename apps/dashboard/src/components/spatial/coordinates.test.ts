@@ -28,6 +28,7 @@ describe("spatial coordinate utilities", () => {
 
     expect(projection.project({ x: 0, y: 0 })).toEqual({ x: 20, y: 540 });
     expect(projection.project({ x: 20, y: 10 })).toEqual({ x: 980, y: 60 });
+    expect(projection.unproject(projection.project({ x: 7.25, y: 3.5 }))).toEqual({ x: 7.25, y: 3.5 });
     expect(projection.distance(5)).toBe(240);
   });
 

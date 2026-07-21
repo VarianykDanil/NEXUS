@@ -13,6 +13,7 @@ export interface Projection2D {
   offsetX: number;
   offsetY: number;
   project: (point: Vec2) => Vec2;
+  unproject: (point: Vec2) => Vec2;
   distance: (metres: number) => number;
 }
 
@@ -159,6 +160,10 @@ export function createProjection(
     project: ({ x, y }) => ({
       x: offsetX + (x - bounds.minX) * scale,
       y: offsetY + (bounds.maxY - y) * scale,
+    }),
+    unproject: ({ x, y }) => ({
+      x: bounds.minX + (x - offsetX) / scale,
+      y: bounds.maxY - (y - offsetY) / scale,
     }),
     distance: (metres) => metres * scale,
   };

@@ -1,5 +1,11 @@
 # NEXUS hackathon demo guide
 
+> **Submission recording:** use the organizer-aligned
+> [2:50 voiceover script](demo-video-script.md) for the final YouTube video, then
+> complete the [final submission checklist](submission-checklist.md). The longer
+> walkthrough below is a presenter reference, not a requirement to show every
+> feature in the submitted video.
+
 ## The one-sentence story
 
 NEXUS turns a real-world engineering objective into reviewable requirements,
@@ -15,19 +21,28 @@ single evidence chain:
 2. NEXUS creates measurable requirements and an execution pipeline.
 3. The OpenAI Engineering Review produces a schema-validated, read-only review
    when `OPENAI_API_KEY` is configured.
-4. Simulation moves the virtual fleet through a metric three-floor building.
-5. Every displayed route is checked against wall solids, door openings, robot
+4. In **Digital twin**, a judge can type a job or select its destination on the
+   map. NEXUS explains the recalled memory, robot assignment, route, and six
+   execution stages.
+5. A live virtual fleet continuously follows collision-checked routes at four
+   WebSocket updates per second; the operator can stop and restart it visibly.
+6. Simulation executes the job, records stage evidence, and writes completed
+   experience memory for reuse.
+7. Every displayed route is checked against wall solids, door openings, robot
    clearance, and co-located stair transitions.
-6. Mission Assurance derives its status from the current data source, route
+8. Mission Assurance derives its status from the current data source, route
    audits, fleet state, requirements, simulation, approvals, and audit chain.
-7. A physical request becomes a pending human approval; even approval leaves
-   the hardware adapter denied in this repository.
-8. The audit page verifies the complete hash-linked decision history.
+9. The Live robot camera connects to a reliable Demo Spot feed, or to a real
+   Spot's read-only telemetry and image services when locally configured.
+10. A physical request becomes a pending human approval; approval can connect the
+   observation link but still sends no motion command.
+11. The audit page verifies the complete hash-linked decision history.
 
-This sequence makes each claim inspectable. The dashboard must continue to say
-`simulation only` and must not imply that virtual telemetry came from hardware.
+This sequence makes each claim inspectable. The dashboard separates the
+simulation-only spatial twin from the labeled read-only robot camera and must
+not imply that virtual telemetry came from hardware.
 
-## A focused three-minute presentation
+## Extended three-minute presenter reference
 
 ### 0:00-0:30 — objective and stakes
 
@@ -51,10 +66,13 @@ If no API key is configured, skip this call rather than pretending a local
 result came from OpenAI. The deterministic project plan and all simulation
 features remain available offline.
 
-### 1:10-2:05 — spatial proof
+### 1:10-2:15 — spatial job and proof
 
 Start the simulation and open **Digital twin**:
 
+- point out **VIRTUAL FLEET LIVE**, three moving robots, and four updates/sec;
+- stop and restart virtual movement to prove the scene is live rather than a
+  prerecorded animation;
 - switch between the north-up 2D plan and the 3D building;
 - use **All floors** and **Home** to frame the complete structure;
 - follow a robot while it moves through actual door openings;
@@ -62,8 +80,16 @@ Start the simulation and open **Digital twin**:
 - show that stair transitions occur at the declared vertical core;
 - point to **Route geometry** in Mission Assurance: it is computed from the
   displayed wall, door, path, and trail data rather than a synthetic score.
+- connect **Live robot camera**, switch camera sources, and point out whether the
+  panel says `Demo Spot` or `Boston Dynamics Spot`.
+- in **Tell the fleet what job to do**, choose the Electrical Plant on the map
+  or type `Inspect the Electrical Plant for heat and record evidence`;
+- build the job pipeline and point to the matched location/procedure memory,
+  selected Hazard Surveyor, wall-safe route, and assignment rationale;
+- press **Run in digital twin** and show all six stages complete, including the
+  evidence and new experience-memory count.
 
-### 2:05-2:40 — failure and recovery
+### 2:15-2:40 — failure and recovery
 
 Use the emergency-stop flow. The API cancels simulation, projects zero robot
 speed, records a safety event, and blocks relaunch while the stop is latched.
@@ -82,11 +108,11 @@ events were recorded.
 | Question | NEXUS answer |
 | --- | --- |
 | Where is OpenAI used? | An optional server-side Responses API call creates a bounded structured engineering review from current project evidence. |
-| Can the model move a robot? | No. The reviewer receives no tools, and this repository has no enabled hardware command path. |
+| Can the model move a robot? | No. The reviewer receives no tools. The Spot connector is read-only and never acquires a lease or motor authority. |
 | Is the map real? | It is a deterministic metric digital twin and is labeled simulation-only; it is not represented as SLAM or BIM input. |
 | Why trust the route? | Backend and frontend route auditors subtract declared door openings from wall solids, enforce clearance, and test all displayed paths and trails. |
 | What happens without internet or an API key? | Deterministic planning, dashboard, simulation, route checks, approvals, and audit verification continue to work; only OpenAI review is unavailable. |
-| What is genuinely live? | Sequenced WebSocket project and robot state from the local control plane. Sequence gaps trigger an authoritative REST reconciliation. |
+| What is genuinely live? | Three moving virtual robots are calculated server-side and streamed at four updates/sec over a sequenced WebSocket, alongside a changing Demo Spot camera. With local credentials, that camera panel reads a real Spot's current image service. |
 | Is it production-ready? | No. It is a simulation-first engineering foundation; authentication, durable jobs/events, a real simulator, and a certified robot edge remain explicit roadmap work. |
 
 ## Pre-demo checklist
@@ -106,13 +132,19 @@ Then verify:
 
 - the browser has no console errors;
 - the page is using live API data rather than the offline demo fallback;
+- **VIRTUAL FLEET LIVE** shows three moving robots and robot poses change smoothly;
+- stop freezes virtual movement and start restores it;
+- the Live robot camera connects and its source selector changes frames;
+- text and map-targeted jobs both build a detailed plan;
+- a simulation job completes all six stages and adds experience memory;
 - 2D and 3D routes pass through visible door openings;
 - **Home**, floor selection, layer controls, robot selection, follow mode, zoom,
   approvals, new objective, and emergency stop all respond;
 - the OpenAI key is available only to the API container, never bundled into the
   dashboard;
 - the latest backend, frontend, C++ navigation, and Compose checks are green;
-- the presenter can explain every simulation-only limitation without hedging.
+- the presenter can explain the simulation-twin versus read-only-camera boundary
+  without hedging.
 
 ## Honest next steps after the hackathon
 

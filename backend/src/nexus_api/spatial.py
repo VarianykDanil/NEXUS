@@ -248,6 +248,10 @@ ROBOT_ROUTES: tuple[tuple[RoutePoint, ...], ...] = (
     ),
 )
 
+DEMO_MOTION_SPEEDS_MPS = (0.62, 0.48, 0.38)
+DEMO_MOTION_TRAIL_SECONDS = 12.0
+DEMO_MOTION_TRAIL_INTERVAL_SECONDS = 0.75
+
 Point2D = tuple[float, float]
 
 
@@ -719,7 +723,7 @@ def _connection_for_virtual_robot(project: ProjectDetail) -> str:
     if project.status == "emergency_stopped" or (robot and robot.emergency_stopped):
         return "stopped"
     if project.active_mode == "physical":
-        return "adapter_denied"
+        return "virtual_twin_paused"
     if project.status.startswith("simulation"):
         return "digital_twin_connected"
     return "virtual_ready"
@@ -739,7 +743,7 @@ def build_robots(project: ProjectDetail) -> list[SpatialRobotRead]:
     legacy = project.robot_state
     connection = _connection_for_virtual_robot(project)
     status = _status_for_virtual_robot(project)
-    stopped = connection in {"stopped", "adapter_denied"}
+    stopped = connection in {"stopped", "virtual_twin_paused"}
     running = project.status == "simulation_running" and not stopped
     base_battery = legacy.battery_percent if legacy else 100.0
     names = ("Sentinel Scout 01", "Hazard Surveyor 02", "Mapping Relay 03")
@@ -822,6 +826,151 @@ def build_robots(project: ProjectDetail) -> list[SpatialRobotRead]:
             )
         )
     return robots
+
+
+@cache
+def demo_motion_routes() -> tuple[tuple[RoutePoint, ...], ...]:
+    """Return closed, collision-checked routes for the continuously moving demo fleet."""
+
+    return tuple(plan_robot_route((*route, route[0])) for route in ROBOT_ROUTES)
+
+
+def _motion_segment_distance(start: RoutePoint, end: RoutePoint) -> float:
+    if start.floor_id != end.floor_id:
+        return FLOOR_HEIGHT_M
+    return math.dist((start.x, start.y), (end.x, end.y))
+
+
+def _motion_pose_at_distance(
+    route: tuple[RoutePoint, ...], distance_metres: float
+) -> RoutePoint:
+    segments = list(zip(route, route[1:], strict=False))
+    lengths = [_motion_segment_distance(start, end) for start, end in segments]
+    total = sum(lengths)
+    if total <= NAVIGATION_EPSILON:
+        return route[0]
+    cursor = distance_metres % total
+    for (start, end), length in zip(segments, lengths, strict=True):
+        if cursor > length and length > NAVIGATION_EPSILON:
+            cursor -= length
+            continue
+        fraction = 1.0 if length <= NAVIGATION_EPSILON else max(0.0, min(1.0, cursor / length))
+        if start.floor_id != end.floor_id:
+            # Floor changes are co-located in a declared connector. Keep the
+            # floor/elevation discrete so clients never render a robot between floors.
+            floor_id = start.floor_id if fraction < 0.5 else end.floor_id
+            return RoutePoint(floor_id, start.x, start.y, end.yaw_degrees)
+        x = start.x + (end.x - start.x) * fraction
+        y = start.y + (end.y - start.y) * fraction
+        yaw = (
+            math.degrees(math.atan2(end.y - start.y, end.x - start.x)) % 360
+            if length > NAVIGATION_EPSILON
+            else end.yaw_degrees
+        )
+        return RoutePoint(start.floor_id, x, y, yaw)
+    return route[-1]
+
+
+def build_demo_motion_robots(
+    project: ProjectDetail,
+    elapsed_seconds: float,
+    *,
+    speed_multiplier: float = 1.0,
+) -> list[SpatialRobotRead]:
+    """Project a smooth, looping virtual fleet without pretending it is hardware."""
+
+    names = ("Sentinel Scout 01", "Hazard Surveyor 02", "Mapping Relay 03")
+    models = ("NEXUS M2", "NEXUS H1", "NEXUS Relay")
+    roles = ("lead_scout", "hazard_survey", "mapping_relay")
+    missions = (
+        "Live virtual patrol",
+        "Live virtual hazard survey",
+        "Live virtual mapping relay",
+    )
+    routes = demo_motion_routes()
+    robots: list[SpatialRobotRead] = []
+    bounded_multiplier = max(0.1, min(4.0, speed_multiplier))
+
+    for index, route in enumerate(routes):
+        speed = DEMO_MOTION_SPEEDS_MPS[index] * bounded_multiplier
+        route_distance = sum(
+            _motion_segment_distance(start, end)
+            for start, end in zip(route, route[1:], strict=False)
+        )
+        # Stable offsets stop the robots from appearing to launch in lockstep.
+        travelled = elapsed_seconds * speed + route_distance * (index * 0.19)
+        current = _motion_pose_at_distance(route, travelled)
+        trail: list[SpatialTrailPointRead] = []
+        sample_count = int(
+            DEMO_MOTION_TRAIL_SECONDS / DEMO_MOTION_TRAIL_INTERVAL_SECONDS
+        )
+        for sample in range(sample_count, -1, -1):
+            historical = _motion_pose_at_distance(
+                route,
+                travelled - sample * DEMO_MOTION_TRAIL_INTERVAL_SECONDS * speed,
+            )
+            point = SpatialTrailPointRead(
+                x=round(historical.x, 3),
+                y=round(historical.y, 3),
+                z=_floor_elevation(historical.floor_id),
+                floor_id=historical.floor_id,
+            )
+            if not trail or point != trail[-1]:
+                trail.append(point)
+
+        cycle = 0.0 if route_distance <= NAVIGATION_EPSILON else travelled / route_distance
+        battery = 86.0 + 6.0 * math.cos(cycle * math.tau + index * 0.8)
+        robots.append(
+            SpatialRobotRead(
+                id=f"rbt-{project.id[:8]}-{index + 1:02d}",
+                name=names[index],
+                model=models[index],
+                role=roles[index],
+                status="nominal",
+                connection="virtual_demo_stream_live",
+                battery=_clamp_percent(battery),
+                speed=round(speed, 2),
+                localization=round(98.8 - index * 1.1, 1),
+                mission=missions[index],
+                pose=SpatialRobotPoseRead(
+                    x=round(current.x, 3),
+                    y=round(current.y, 3),
+                    z=_floor_elevation(current.floor_id),
+                    yaw=round(current.yaw_degrees, 1),
+                    floor_id=current.floor_id,
+                ),
+                trail=trail,
+            )
+        )
+    return robots
+
+
+def build_demo_motion_snapshot(
+    project: ProjectDetail,
+    elapsed_seconds: float,
+    *,
+    speed_multiplier: float = 1.0,
+    stream_id: str = "demo-motion",
+    event_sequence: int = 0,
+    generated_at: datetime | None = None,
+) -> SpatialSnapshotRead:
+    """Build the authoritative frame emitted by the continuous demo-motion worker."""
+
+    now = generated_at or datetime.now(UTC)
+    robots = build_demo_motion_robots(
+        project,
+        elapsed_seconds,
+        speed_multiplier=speed_multiplier,
+    )
+    return SpatialSnapshotRead(
+        project_id=project.id,
+        generated_at=now,
+        revision=max(0, int(now.timestamp() * 1000)),
+        stream_id=stream_id,
+        event_sequence=event_sequence,
+        building=build_building(project, robots),
+        robots=robots,
+    )
 
 
 def _hazards(project: ProjectDetail) -> list[SpatialHazardRead]:

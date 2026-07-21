@@ -5,6 +5,7 @@ import {
   clampProjectionPan,
   clientDeltaToSvg,
   createProjection,
+  clamp,
   describeFloor,
   doorGeometry,
   floorBounds,
@@ -20,6 +21,7 @@ import type {
   BuildingState,
   FleetRobot,
   FloorSelection,
+  MapJobTarget,
   RobotPose,
   SpatialHazard,
   SpatialLayers,
@@ -49,8 +51,11 @@ export interface FloorPlan2DProps {
   zoom: number;
   resetVersion: number;
   compact?: boolean;
+  jobTargeting?: boolean;
+  jobTarget?: MapJobTarget | null;
   onRobotSelect: (id: string) => void;
   onHazardSelect: (hazard: SpatialHazard, floorId: string) => void;
+  onJobTargetSelect?: (target: MapJobTarget) => void;
 }
 
 interface DragState {
@@ -191,8 +196,11 @@ export function FloorPlan2D({
   zoom,
   resetVersion,
   compact = false,
+  jobTargeting = false,
+  jobTarget,
   onRobotSelect,
   onHazardSelect,
+  onJobTargetSelect,
 }: FloorPlan2DProps) {
   const titleId = useId();
   const descriptionId = useId();
@@ -322,8 +330,39 @@ export function FloorPlan2D({
   }, [floorSelection, resetVersion]);
 
   function startDrag(event: React.PointerEvent<SVGSVGElement>) {
-    if (event.pointerType === "touch" || event.button !== 0 || floors.length !== 1) return;
+    if (event.button > 0 || floors.length !== 1) return;
     if ((event.target as Element).closest(".spatial-robot, .spatial-hazard")) return;
+    if (jobTargeting && onJobTargetSelect) {
+      const floor = floors[0];
+      const frame = frames[0];
+      const renderedBounds = event.currentTarget.getBoundingClientRect();
+      if (!floor || !frame || renderedBounds.width < 1 || renderedBounds.height < 1) return;
+      const projection = createProjection(
+        floorBounds(floor),
+        { ...frame, padding: SINGLE_FLOOR_PADDING },
+        zoom,
+        boundedPan,
+      );
+      const point = projection.unproject({
+        x: ((event.clientX - renderedBounds.left) / renderedBounds.width) * viewport.width,
+        y: ((event.clientY - renderedBounds.top) / renderedBounds.height) * viewport.height,
+      });
+      const x = clamp(point.x, 0, floor.width);
+      const y = clamp(point.y, 0, floor.depth);
+      const room = floor.rooms.find((candidate) => (
+        x >= candidate.x && x <= candidate.x + candidate.width
+        && y >= candidate.y && y <= candidate.y + candidate.depth
+      ));
+      onJobTargetSelect({
+        floorId: floor.id,
+        x,
+        y,
+        roomId: room?.id,
+        roomLabel: room?.label,
+      });
+      return;
+    }
+    if (event.pointerType === "touch") return;
     if (typeof event.currentTarget.setPointerCapture === "function") {
       event.currentTarget.setPointerCapture(event.pointerId);
     }
@@ -378,7 +417,7 @@ export function FloorPlan2D({
         viewBox={`0 0 ${viewport.width} ${viewport.height}`}
         role="img"
         aria-labelledby={`${titleId} ${descriptionId}`}
-        className={dragging ? "is-dragging" : ""}
+        className={`${dragging ? "is-dragging" : ""}${jobTargeting ? " is-job-targeting" : ""}`.trim()}
         onPointerDown={startDrag}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
@@ -584,6 +623,18 @@ export function FloorPlan2D({
                   onSelect={() => onRobotSelect(robot.id)}
                 />
               ))}
+
+              {jobTarget?.floorId === floor.id && (() => {
+                const point = projection.project(jobTarget);
+                return (
+                  <g className="spatial-job-target" transform={`translate(${point.x} ${point.y})`} aria-label="Selected job destination">
+                    <circle className="spatial-job-target-aura" r="18" />
+                    <circle r="8" />
+                    <path d="M-13 0H13M0-13V13" />
+                    <text x="13" y="-12">JOB</text>
+                  </g>
+                );
+              })()}
 
               <g className="spatial-floor-caption" transform={`translate(${frame.x + 18} ${frame.y + 23})`}>
                 <text>{floor.label}</text>

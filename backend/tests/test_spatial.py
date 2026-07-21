@@ -8,12 +8,15 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from nexus_api.events import EventBroker
+from nexus_api.schemas import ProjectDetail
 from nexus_api.spatial import (
     FLOOR_IDS,
     ROBOT_CLEARANCE_M,
     ROBOT_ROUTES,
     RoutePoint,
     audit_floor_route,
+    build_demo_motion_robots,
+    demo_motion_routes,
     is_declared_floor_transition,
     plan_robot_route,
 )
@@ -150,6 +153,39 @@ def test_every_complete_robot_route_uses_doors_and_declared_vertical_connectors(
             assert audit.minimum_clearance >= ROBOT_CLEARANCE_M - 1e-6
 
         for previous, current in zip(planned, planned[1:], strict=False):
+            if previous.floor_id != current.floor_id:
+                assert is_declared_floor_transition(previous, current)
+
+
+def test_continuous_demo_fleet_moves_on_closed_collision_checked_routes(
+    client: TestClient, project: dict[str, object]
+) -> None:
+    detail = ProjectDetail.model_validate(
+        client.get(f"/api/v1/projects/{project['id']}").json()
+    )
+    initial = build_demo_motion_robots(detail, 0.0)
+    advanced = build_demo_motion_robots(detail, 1.0)
+
+    assert len(initial) == len(advanced) == 3
+    assert all(robot.connection == "virtual_demo_stream_live" for robot in advanced)
+    assert all(robot.status == "nominal" for robot in advanced)
+    assert all(robot.speed > 0 for robot in advanced)
+    assert all(1 <= len(robot.trail) <= 17 for robot in advanced)
+    assert all(
+        first.pose.model_dump() != second.pose.model_dump()
+        for first, second in zip(initial, advanced, strict=True)
+    )
+
+    for route in demo_motion_routes():
+        assert route[0].floor_id == route[-1].floor_id
+        assert (route[0].x, route[0].y) == (route[-1].x, route[-1].y)
+        for floor_id in FLOOR_IDS:
+            floor_points = [
+                (point.x, point.y) for point in route if point.floor_id == floor_id
+            ]
+            if floor_points:
+                assert audit_floor_route(floor_id, floor_points).valid
+        for previous, current in zip(route, route[1:], strict=False):
             if previous.floor_id != current.floor_id:
                 assert is_declared_floor_transition(previous, current)
 

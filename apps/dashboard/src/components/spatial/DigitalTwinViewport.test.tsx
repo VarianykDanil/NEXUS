@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BuildingState, FleetRobot } from "./model";
@@ -85,6 +85,43 @@ describe("DigitalTwinViewport", () => {
     await user.click(screen.getByRole("button", { name: /Scout One, nominal/i }));
     expect(onRobotSelect).toHaveBeenCalledWith("scout-1");
     expect(screen.getByText(/X 5.00 m/)).toBeInTheDocument();
+  });
+
+  it("turns a plan click into a metric robot-job target", () => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    const onJobTargetSelect = vi.fn();
+    render(
+      <DigitalTwinViewport
+        building={building}
+        robots={robots}
+        activeRobotId="scout-1"
+        jobTargeting
+        onJobTargetSelect={onJobTargetSelect}
+      />,
+    );
+    const plan = screen.getByRole("img", { name: /Responder training centre top-down building plan/i });
+    vi.spyOn(plan, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1000,
+      bottom: 620,
+      width: 1000,
+      height: 620,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(plan, { button: 0, pointerId: 1, pointerType: "mouse", clientX: 283.333333, clientY: 440 });
+
+    expect(onJobTargetSelect).toHaveBeenCalledWith(expect.objectContaining({
+      floorId: "ground",
+      roomId: "lobby",
+      roomLabel: "Lobby",
+    }));
+    const selectedTarget = onJobTargetSelect.mock.calls[0][0];
+    expect(selectedTarget.x).toBeCloseTo(5);
+    expect(selectedTarget.y).toBeCloseTo(3);
   });
 
   it("carves door openings and keeps walls and labels above route strokes", () => {

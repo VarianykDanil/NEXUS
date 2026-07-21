@@ -54,7 +54,7 @@ def test_health_ready_project_crud_and_dashboard(
     assert requirements["Fail-safe operation"]["status"] == "unverified"
 
 
-def test_physical_launch_is_approval_gated_and_adapter_denied(
+def test_physical_launch_is_approval_gated_and_demo_link_is_read_only(
     client: TestClient, project: dict[str, object]
 ) -> None:
     project_id = str(project["id"])
@@ -66,7 +66,7 @@ def test_physical_launch_is_approval_gated_and_adapter_denied(
     launch_body = launch.json()
     assert launch_body["hardware_command_sent"] is False
     assert launch_body["project"]["status"] == "awaiting_approval"
-    assert launch_body["project"]["robot_state"]["connection"] == "adapter_denied"
+    assert launch_body["project"]["robot_state"]["connection"] == "demo_available"
     assert launch_body["approval"]["status"] == "pending"
 
     approval_id = launch_body["approval"]["id"]
@@ -83,13 +83,182 @@ def test_physical_launch_is_approval_gated_and_adapter_denied(
     assert decision_body["hardware_command_sent"] is False
     assert decision_body["project"]["status"] == "physical_ready"
     assert decision_body["project"]["physical_execution_enabled"] is False
-    assert decision_body["project"]["robot_state"]["connection"] == "adapter_denied"
+    assert decision_body["project"]["robot_state"]["connection"] == "demo_connected"
+
+    spatial = client.get(f"/api/v1/projects/{project_id}/spatial")
+    assert spatial.status_code == 200
+    assert {robot["connection"] for robot in spatial.json()["robots"]} == {
+        "virtual_twin_paused"
+    }
 
     repeated = client.post(
         f"/api/v1/approvals/{approval_id}/decision",
         json={"decision": "approved", "decided_by": "human.operator"},
     )
     assert repeated.status_code == 409
+
+
+def test_demo_robot_link_connects_and_serves_changing_camera_frames(
+    client: TestClient, project: dict[str, object]
+) -> None:
+    project_id = str(project["id"])
+    initial = client.get(f"/api/v1/projects/{project_id}/robot-link")
+    assert initial.status_code == 200
+    assert initial.json()["adapter"] == "demo"
+    assert initial.json()["configured"] is True
+    assert initial.json()["read_only"] is True
+
+    connected = client.post(f"/api/v1/projects/{project_id}/robot-link/connect")
+    assert connected.status_code == 200
+    body = connected.json()
+    assert body["hardware_command_sent"] is False
+    assert body["status"]["connected"] is True
+    assert len(body["status"]["camera_sources"]) == 3
+
+    source = body["status"]["camera_sources"][0]["name"]
+    frame = client.get(
+        f"/api/v1/projects/{project_id}/robot-link/cameras/{source}/frame"
+    )
+    assert frame.status_code == 200
+    assert frame.headers["content-type"].startswith("image/svg+xml")
+    assert frame.headers["cache-control"] == "no-store, max-age=0"
+    assert b"NEXUS ROBOT LINK" in frame.content
+
+
+def test_demo_motion_can_be_started_streamed_and_stopped_without_hardware(
+    client: TestClient, project: dict[str, object]
+) -> None:
+    project_id = str(project["id"])
+    status_url = f"/api/v1/projects/{project_id}/demo-motion"
+
+    initial = client.get(status_url)
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "enabled": True,
+        "running": False,
+        "simulation_only": True,
+        "frame_interval_seconds": 0.25,
+        "speed_multiplier": 1.0,
+        "message": "Virtual fleet motion is stopped.",
+        "hardware_command_sent": False,
+    }
+
+    with client.websocket_connect(f"/ws/projects/{project_id}") as websocket:
+        assert websocket.receive_json()["type"] == "dashboard.snapshot"
+        started = client.post(
+            f"{status_url}/start",
+            json={"requested_by": "demo.test"},
+        )
+        assert started.status_code == 200
+        assert started.json()["running"] is True
+        assert started.json()["simulation_only"] is True
+        assert started.json()["hardware_command_sent"] is False
+
+        motion_event = None
+        for _ in range(8):
+            event = websocket.receive_json()
+            if event["type"] == "robots.state.updated":
+                motion_event = event
+                break
+        assert motion_event is not None
+        robots = motion_event["payload"]["robots"]
+        assert len(robots) == 3
+        assert all(robot["connection"] == "virtual_demo_stream_live" for robot in robots)
+        assert all(robot["speed"] > 0 for robot in robots)
+        assert motion_event["payload"]["physicalExecutionEnabled"] is False
+
+        stopped = client.post(
+            f"{status_url}/stop",
+            json={"requested_by": "demo.test"},
+        )
+        assert stopped.status_code == 200
+        assert stopped.json()["running"] is False
+        assert stopped.json()["hardware_command_sent"] is False
+
+    assert client.get(status_url).json()["running"] is False
+
+
+def test_text_and_map_jobs_use_memory_build_a_pipeline_and_complete_in_simulation(
+    client: TestClient, project: dict[str, object]
+) -> None:
+    project_id = str(project["id"])
+
+    memories = client.get(f"/api/v1/projects/{project_id}/robot-memory")
+    assert memories.status_code == 200
+    assert {memory["kind"] for memory in memories.json()} == {"location", "procedure"}
+    assert any(memory["label"].startswith("Electrical Plant") for memory in memories.json())
+
+    planned = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={
+            "instruction": "Inspect the Electrical Plant for heat and capture evidence",
+            "execution_mode": "simulation",
+        },
+    )
+    assert planned.status_code == 201
+    job = planned.json()
+    assert job["status"] == "planned"
+    assert job["assigned_robot_name"] == "Hazard Surveyor 02"
+    assert job["target_room_label"] == "Electrical Plant"
+    assert job["memory_context"]["matched_memory_keys"] == [
+        "location:ground:g-plant",
+        "procedure:hazard",
+    ]
+    assert len(job["steps"]) == 6
+    assert {step["status"] for step in job["steps"]} == {"queued"}
+
+    started = client.post(
+        f"/api/v1/projects/{project_id}/jobs/{job['id']}/execute"
+    )
+    assert started.status_code == 202
+    assert started.json()["hardware_command_sent"] is False
+
+    for _ in range(100):
+        listed = client.get(f"/api/v1/projects/{project_id}/jobs").json()
+        current = next(item for item in listed if item["id"] == job["id"])
+        if current["status"] == "completed":
+            break
+        time.sleep(0.01)
+    assert current["status"] == "completed"
+    assert current["progress"] == 100
+    assert {step["status"] for step in current["steps"]} == {"completed"}
+    assert current["result"]["hardware_command_sent"] is False
+
+    updated_memory = client.get(f"/api/v1/projects/{project_id}/robot-memory").json()
+    assert any(memory["key"] == f"experience:{job['id']}" for memory in updated_memory)
+
+    map_job = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={
+            "instruction": "Scan this selected area and update the map",
+            "target": {"floor_id": "ground", "x": 2.0, "y": 2.0},
+        },
+    )
+    assert map_job.status_code == 201
+    assert map_job.json()["memory_context"]["target_resolution"] == (
+        "operator_map_selection"
+    )
+    assert map_job.json()["target_room_label"] == "Reception Lobby"
+
+
+def test_physical_job_can_be_planned_but_not_executed_without_certified_adapter(
+    client: TestClient, project: dict[str, object]
+) -> None:
+    project_id = str(project["id"])
+    planned = client.post(
+        f"/api/v1/projects/{project_id}/jobs",
+        json={
+            "instruction": "Patrol the Reception Lobby and report any obstruction",
+            "execution_mode": "physical",
+        },
+    )
+    assert planned.status_code == 201
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/jobs/{planned.json()['id']}/execute"
+    )
+    assert response.status_code == 409
+    assert "certified command adapter" in response.json()["detail"]
 
 
 def test_dashboard_mode_and_project_scoped_approval_aliases(

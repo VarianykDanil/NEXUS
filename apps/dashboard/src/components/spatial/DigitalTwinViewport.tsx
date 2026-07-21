@@ -50,7 +50,10 @@ export function DigitalTwinViewport({
   activeRobotId,
   streamStatus = "live",
   compact = false,
+  jobTargeting = false,
+  jobTarget,
   onRobotSelect,
+  onJobTargetSelect,
 }: DigitalTwinViewportProps) {
   const threeRef = useRef<Building3DHandle>(null);
   const [mode, setMode] = useState<TwinMode>("plan");
@@ -95,6 +98,18 @@ export function DigitalTwinViewport({
     if (!selection || selection.kind !== "robot" || robots.some((robot) => robot.id === selection.id)) return;
     setSelection(activeRobotId ? { kind: "robot", id: activeRobotId } : null);
   }, [activeRobotId, robots, selection]);
+
+  useEffect(() => {
+    if (!jobTargeting) return;
+    setMode("plan");
+    setFloorSelection((current) => current === "all" ? initialFloor(building, robots, activeRobotId) : current);
+  }, [activeRobotId, building, jobTargeting, robots]);
+
+  useEffect(() => {
+    if (!jobTarget || !building.floors.some((floor) => floor.id === jobTarget.floorId)) return;
+    setMode("plan");
+    setFloorSelection(jobTarget.floorId);
+  }, [building.floors, jobTarget]);
 
   function chooseRobot(id: string) {
     setSelection({ kind: "robot", id });
@@ -236,6 +251,11 @@ export function DigitalTwinViewport({
       </div>
 
       {graphicsNotice && <p className="spatial-graphics-notice" role="status">{graphicsNotice}</p>}
+      {jobTargeting && (
+        <p className="spatial-job-targeting-notice" role="status">
+          <Crosshair size={15} aria-hidden="true" /> Select a safe destination on the active floor plan.
+        </p>
+      )}
 
       <div className="spatial-stage">
         {mode === "plan" ? (
@@ -249,8 +269,11 @@ export function DigitalTwinViewport({
             zoom={planZoom}
             resetVersion={resetVersion}
             compact={compact}
+            jobTargeting={jobTargeting}
+            jobTarget={jobTarget}
             onRobotSelect={chooseRobot}
             onHazardSelect={chooseHazard}
+            onJobTargetSelect={onJobTargetSelect}
           />
         ) : (
           <Suspense fallback={<div className="spatial-loading" role="status">Loading 3D building…</div>}>

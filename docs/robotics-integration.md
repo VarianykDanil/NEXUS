@@ -24,18 +24,20 @@ The spatial response makes the boundary machine-readable:
 - `simulationOnly` is always `true`;
 - `physicalExecutionEnabled` is always `false`;
 - a physical-mode request creates a critical approval request;
-- approval may mark the project hardware-ready, but the current adapter remains
-  denied and sends no command;
+- approval may connect the configured Demo Spot or real Spot observation link,
+  but the adapter remains read-only and sends no command;
 - emergency stop cancels the simulation and latches control-plane state, but it
   is not an acknowledgement from a robot edge or an independent physical
   emergency stop.
 
-A future observation-only edge may translate ROS transforms and diagnostics into
+The current Spot observation link can read identity, battery state, camera
+sources, and images. A future ROS observation edge may translate transforms and diagnostics into
 the same metric `building_enu` scene. It must preserve source timestamps, frame
 identifiers, covariance/freshness information, and per-robot identity. It must
 not turn the display WebSocket into a command path. See
 [Digital twin and realtime](digital-twin.md) for the current scene and sequence
-contract.
+contract. The control plane also supports persistent text/map robot jobs and a
+fully visible simulation pipeline; see [Memory-backed robot jobs](robot-jobs.md).
 
 ## Edge gateway responsibilities
 

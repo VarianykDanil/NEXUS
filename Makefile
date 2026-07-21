@@ -1,7 +1,17 @@
 COMPOSE ?= docker compose
 PYTHON ?= python3
+VENV_PYTHON ?= .venv/bin/python
+PNPM ?= ./scripts/pnpm.sh
+RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
+MYPY ?= $(if $(wildcard .venv/bin/mypy),.venv/bin/mypy,mypy)
+PYTEST_PYTHON ?= $(if $(wildcard $(VENV_PYTHON)),$(VENV_PYTHON),$(PYTHON))
 
-.PHONY: config build up down restart logs ps api-logs web-logs db-shell api-shell lint typecheck test robotics-test check
+.PHONY: native-install config build up down restart logs ps api-logs web-logs db-shell api-shell lint typecheck test robotics-test check
+
+native-install:
+	$(PYTHON) -m venv .venv
+	$(VENV_PYTHON) -m pip install -e './backend[dev,spot]'
+	$(PNPM) install --frozen-lockfile
 
 config:
 	$(COMPOSE) config --quiet
@@ -36,16 +46,16 @@ api-shell:
 	$(COMPOSE) exec api /bin/sh
 
 lint:
-	ruff check backend
-	corepack pnpm --filter @nexus/dashboard lint
+	$(RUFF) check backend
+	$(PNPM) --filter @nexus/dashboard lint
 
 typecheck:
-	mypy backend/src
-	corepack pnpm --filter @nexus/dashboard typecheck
+	$(MYPY) backend/src
+	$(PNPM) --filter @nexus/dashboard typecheck
 
 test:
-	$(PYTHON) -m pytest backend
-	corepack pnpm --filter @nexus/dashboard test
+	$(PYTEST_PYTHON) -m pytest backend
+	$(PNPM) --filter @nexus/dashboard test
 
 robotics-test:
 	cmake -S robotics -B build/robotics -DNEXUS_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release

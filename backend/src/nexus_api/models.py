@@ -53,6 +53,12 @@ class Project(Base):
     tasks: Mapped[list[Task]] = relationship(
         back_populates="project", cascade="all, delete-orphan", lazy="selectin"
     )
+    robot_jobs: Mapped[list[RobotJob]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", lazy="raise"
+    )
+    robot_memories: Mapped[list[RobotMemory]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", lazy="raise"
+    )
     approvals: Mapped[list[Approval]] = relationship(
         back_populates="project", cascade="all, delete-orphan", lazy="selectin"
     )
@@ -116,6 +122,61 @@ class Task(Base):
     position: Mapped[int] = mapped_column(Integer)
 
     project: Mapped[Project] = relationship(back_populates="tasks")
+
+
+class RobotJob(Base):
+    __tablename__ = "robot_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    instruction: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="planned", index=True)
+    execution_mode: Mapped[str] = mapped_column(String(24), default="simulation")
+    risk: Mapped[str] = mapped_column(String(16), default="medium")
+    requested_by: Mapped[str] = mapped_column(String(120), default="dashboard.operator")
+    assigned_robot_id: Mapped[str] = mapped_column(String(80))
+    assigned_robot_name: Mapped[str] = mapped_column(String(160))
+    target_floor_id: Mapped[str] = mapped_column(String(80))
+    target_room_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_room_label: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    target_x: Mapped[float] = mapped_column(Float)
+    target_y: Mapped[float] = mapped_column(Float)
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    memory_context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="robot_jobs")
+
+
+class RobotMemory(Base):
+    __tablename__ = "robot_memories"
+    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_robot_memory_project_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(180))
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    label: Mapped[str] = mapped_column(String(180))
+    content: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    project: Mapped[Project] = relationship(back_populates="robot_memories")
 
 
 class Approval(Base):

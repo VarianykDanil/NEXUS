@@ -137,7 +137,9 @@ describe("spatial dashboard views", () => {
     expect(screen.getByRole("button", { name: /2d plan/i })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /3d building/i })).toBeEnabled();
     expect(screen.getByRole("combobox", { name: /floor/i })).toHaveValue("ground");
-    expect(screen.getByText(/simulation only/i)).toBeInTheDocument();
+    expect(screen.getByText(/robot link read-only/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Tell the fleet what job to do" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose on map" })).toBeEnabled();
   });
 
   it("exports a complete, safely quoted traceability matrix", () => {

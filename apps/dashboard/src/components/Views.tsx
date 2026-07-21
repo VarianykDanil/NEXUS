@@ -1,7 +1,9 @@
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Box,
+  Camera,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -14,6 +16,7 @@ import {
   MapPin,
   Navigation,
   Radio,
+  RefreshCw,
   Route,
   ScanLine,
   Server,
@@ -26,6 +29,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { dataSourceLabel, spatialStreamStatus, type DataSourceState } from "../lib/dataSource";
+import { connectRobotLink, fetchRobotLink, getRobotCameraFrameUrl } from "../lib/api";
 import { buildMissionAssurance, type AssuranceEvidence } from "../lib/missionAssurance";
 import type {
   Approval,
@@ -35,9 +39,13 @@ import type {
   EngineeringReviewResponse,
   PipelineTask,
   Requirement,
+  RobotLinkStatus,
   TaskStatus,
 } from "../types";
 import { DigitalTwinViewport } from "./spatial";
+import { DemoMotionControl } from "./DemoMotionControl";
+import { RobotJobPanel } from "./RobotJobPanel";
+import type { MapJobTarget } from "./spatial/model";
 import { ProgressRing, StatusDot, TelemetryCard, statusClass } from "./Visuals";
 
 interface ViewProps {
@@ -297,17 +305,114 @@ export function MissionView({ snapshot, source, onNavigate }: ViewProps) {
   );
 }
 
+function RobotLinkPanel({ projectId }: { projectId: string }) {
+  const [status, setStatus] = useState<RobotLinkStatus | null>(null);
+  const [selectedSource, setSelectedSource] = useState("");
+  const [frameNonce, setFrameNonce] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchRobotLink(projectId, controller.signal)
+      .then((next) => {
+        setStatus(next);
+        setSelectedSource((current) => current || next.cameraSources[0]?.name || "");
+      })
+      .catch((caught: unknown) => {
+        if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+          setError(caught instanceof Error ? caught.message : "Robot link is unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!status?.connected || !selectedSource) return undefined;
+    setFrameNonce(Date.now());
+    const timer = window.setInterval(() => setFrameNonce(Date.now()), 1200);
+    return () => window.clearInterval(timer);
+  }, [selectedSource, status?.connected]);
+
+  const frameUrl = useMemo(
+    () => selectedSource ? getRobotCameraFrameUrl(projectId, selectedSource, frameNonce) : "",
+    [frameNonce, projectId, selectedSource],
+  );
+
+  async function connect(): Promise<void> {
+    setPending(true);
+    setError(null);
+    try {
+      const next = await connectRobotLink(projectId);
+      setStatus(next);
+      setSelectedSource((current) => current || next.cameraSources[0]?.name || "");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Robot link could not connect");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const adapterLabel = status?.adapter === "spot" ? "Boston Dynamics Spot" : status?.adapter === "demo" ? "Demo Spot" : "Robot adapter";
+  return (
+    <section className="panel robot-link-panel" aria-labelledby="robot-link-title">
+      <PanelHeader
+        eyebrow="EDGE ROBOT LINK"
+        title="Live robot camera"
+        action={<span className={`robot-link-state ${status?.connected ? "connected" : ""}`}><Radio size={13} /> {status?.connected ? "CONNECTED" : "MOTION LOCKED"}</span>}
+      />
+      <div className="robot-link-layout">
+        <div className="robot-camera-shell">
+          {status?.connected && frameUrl ? (
+            <img src={frameUrl} alt={`Live ${adapterLabel} camera: ${selectedSource}`} />
+          ) : (
+            <div className="robot-camera-empty"><Camera size={31} /><strong>{adapterLabel}</strong><span>Connect the read-only edge link to view camera frames.</span></div>
+          )}
+        </div>
+        <div className="robot-link-details">
+          <div><span className="eyebrow">ADAPTER</span><strong>{adapterLabel}</strong><small>{status?.message ?? "Checking robot-link configuration..."}</small></div>
+          <dl>
+            <div><dt>Robot</dt><dd>{status?.robotName ?? "Not connected"}</dd></div>
+            <div><dt>Serial</dt><dd>{status?.serialNumber ?? "—"}</dd></div>
+            <div><dt>Battery</dt><dd>{status?.batteryPercent == null ? "—" : `${status.batteryPercent.toFixed(0)}%`}</dd></div>
+            <div><dt>Authority</dt><dd>Read-only</dd></div>
+          </dl>
+          {status?.cameraSources.length ? (
+            <label className="robot-camera-select">Camera source
+              <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)}>
+                {status.cameraSources.map((source) => <option value={source.name} key={source.name}>{source.label}</option>)}
+              </select>
+            </label>
+          ) : null}
+          {error && <p className="robot-link-error" role="alert">{error}</p>}
+          <button className="button secondary" type="button" disabled={pending || status?.adapter === "disabled"} onClick={() => void connect()}>
+            <RefreshCw size={15} className={pending ? "spin" : ""} /> {pending ? "Connecting..." : status?.connected ? "Reconnect" : "Connect robot link"}
+          </button>
+          <p className="robot-link-safety"><ShieldCheck size={14} /> Camera access never grants a Spot lease, motor power, or motion authority.</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function TwinView({ snapshot, source }: ViewProps) {
   const primaryRobot = snapshot.robots[0];
+  const [jobTarget, setJobTarget] = useState<MapJobTarget | null>(null);
+  const [jobTargeting, setJobTargeting] = useState(false);
   return (
     <div className="view-stack">
       <div className="page-heading">
         <div><span className="eyebrow">DIGITAL TWIN / LIVE</span><h1>Spatial intelligence</h1><p>Metric floor plans, a navigable 3D building, and every robot on one live frame.</p></div>
         <div className="heading-actions">
           <span className={`live-badge stream-${source}`}><span /> {source === "live" ? "LIVE WEBSOCKET" : dataSourceLabel(source)}</span>
-          <span className="simulation-only-badge">SIMULATION ONLY · NO HARDWARE COMMANDS</span>
+          <span className="simulation-only-badge">DIGITAL TWIN SAFE · ROBOT LINK READ-ONLY</span>
         </div>
       </div>
+      <DemoMotionControl
+        projectId={snapshot.project.id}
+        robots={snapshot.robots}
+        apiEnabled={source !== "demo"}
+      />
       <section className="panel twin-spatial-panel">
         <PanelHeader
           eyebrow="BUILDING_ENU / METRES"
@@ -319,8 +424,25 @@ export function TwinView({ snapshot, source }: ViewProps) {
           robots={snapshot.robots}
           activeRobotId={primaryRobot?.id}
           streamStatus={spatialStreamStatus(source)}
+          jobTargeting={jobTargeting}
+          jobTarget={jobTarget}
+          onJobTargetSelect={(target) => {
+            setJobTarget(target);
+            setJobTargeting(false);
+          }}
         />
       </section>
+      <RobotJobPanel
+        projectId={snapshot.project.id}
+        target={jobTarget}
+        targeting={jobTargeting}
+        onTargetingChange={setJobTargeting}
+        onTargetClear={() => {
+          setJobTarget(null);
+          setJobTargeting(false);
+        }}
+      />
+      <RobotLinkPanel projectId={snapshot.project.id} />
     </div>
   );
 }
