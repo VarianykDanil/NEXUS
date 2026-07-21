@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       CXX: ${{ matrix.compiler.cxx }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Configure
         run: cmake -S robotics -B build/robotics -DNEXUS_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -99,7 +99,7 @@ jobs:
       - robotics-core
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Validate Compose
         run: docker compose config --quiet
       - name: Build core images
