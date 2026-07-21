@@ -11,7 +11,7 @@ RUN groupadd --gid 10001 nexus \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN --mount=type=cache,target=/root/.cache/pip python -m pip install .
+RUN --mount=type=cache,target=/root/.cache/pip python -m pip install '.[spot]'
 
 USER nexus
 EXPOSE 8000

@@ -134,6 +134,15 @@ Implemented REST resources are:
 | `GET` | `/api/v1/projects/{id}` | Full project domain detail |
 | `GET` | `/api/v1/projects/{id}/dashboard` | Dashboard projection, building, and fleet |
 | `GET` | `/api/v1/projects/{id}/spatial` | Canonical read-only metric scene |
+| `GET` | `/api/v1/projects/{id}/demo-motion` | Continuous virtual fleet worker status |
+| `POST` | `/api/v1/projects/{id}/demo-motion/start` | Start simulation-only fleet motion |
+| `POST` | `/api/v1/projects/{id}/demo-motion/stop` | Stop simulation-only fleet motion |
+| `GET` | `/api/v1/projects/{id}/robot-link` | Inspect the read-only demo/Spot link |
+| `POST` | `/api/v1/projects/{id}/robot-link/connect` | Connect the read-only demo/Spot link |
+| `GET` | `/api/v1/projects/{id}/robot-link/cameras/{source}/frame` | Read a demo/Spot camera frame |
+| `GET` | `/api/v1/projects/{id}/robot-memory` | List location, procedure, and experience memory |
+| `GET`, `POST` | `/api/v1/projects/{id}/jobs` | List or plan memory-backed robot jobs |
+| `POST` | `/api/v1/projects/{id}/jobs/{job_id}/execute` | Execute a job in simulation only |
 | `POST` | `/api/v1/projects/{id}/ai-review` | Optional structured, read-only OpenAI engineering review |
 | `POST` | `/api/v1/projects/{id}/launch` | Start simulation or request physical approval |
 | `POST` | `/api/v1/projects/{id}/mode` | Dashboard mode-request alias |

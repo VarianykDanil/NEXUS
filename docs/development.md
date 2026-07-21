@@ -4,10 +4,29 @@
 
 - Docker Desktop or Docker Engine with a recent Compose v2 plugin
 - Python 3.11 or newer for native API development
-- Node.js 22 with Corepack for native dashboard development
+- Node.js 22 or newer with npm, Corepack, or pnpm for native dashboard development
 - CMake 3.16+ and a C++17 compiler for the robotics core
 
 ROS 2 and Gazebo are optional. The base application does not require either.
+
+## macOS native setup
+
+Docker is the shortest path to the full demo and does not require native Python,
+Node.js, or CMake dependencies. To work on the API and dashboard directly on a
+Mac, run:
+
+```sh
+make native-install
+```
+
+This creates the ignored `.venv`, installs the API development extras, and
+installs the dashboard's lockfile-pinned packages. NEXUS uses
+`scripts/pnpm.sh` to prefer an existing pnpm, then Corepack, and finally npm's
+package runner with the repository's pinned pnpm 10.13.1. This keeps current
+Node.js releases that do not bundle Corepack usable without a global install.
+
+Install CMake separately when working on the dependency-free robotics core. On
+a Homebrew-managed Mac, `brew install cmake` provides the required tools.
 
 ## Configuration
 
@@ -47,7 +66,7 @@ docker compose version
 docker compose config --quiet
 docker compose up --build --detach --wait
 docker compose ps
-Start-Process "http://localhost:3000"
+Start-Process "http://localhost:3006"
 ```
 
 Docker Desktop must be running with its Linux engine ready. A message mentioning
@@ -64,7 +83,7 @@ docker compose up --build --detach --wait
 docker compose ps
 ```
 
-The dashboard is at <http://localhost:3000>, the API at
+The dashboard is at <http://localhost:3006>, the API at
 <http://localhost:8000>, and PostgreSQL at `localhost:5432`. Browser traffic to
 `/api/` and `/ws/` goes through the dashboard proxy, so the production build can
 use same-origin URLs.
@@ -90,9 +109,9 @@ an explicit destructive operation and is intentionally absent from the Makefile.
 From the repository root:
 
 ```sh
-python -m venv .venv
-python -m pip install -e "./backend[dev]"
-python -m uvicorn nexus_api.main:app --reload --port 8000
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "./backend[dev,spot]"
+.venv/bin/python -m uvicorn nexus_api.main:app --reload --port 8000
 ```
 
 The API may use its documented SQLite development default when PostgreSQL is not
@@ -104,7 +123,7 @@ Windows PowerShell without virtual-environment activation:
 Set-Location "C:\path\to\NEXUS"
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".\backend[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".\backend[dev,spot]"
 .\.venv\Scripts\python.exe -m uvicorn nexus_api.main:app --reload --port 8000
 ```
 
@@ -133,9 +152,8 @@ release job, never concurrently in every API replica.
 From the repository root:
 
 ```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm --filter @nexus/dashboard dev --host 0.0.0.0 --port 5173
+./scripts/pnpm.sh install --frozen-lockfile
+./scripts/pnpm.sh --filter @nexus/dashboard dev --host 0.0.0.0 --port 5173
 ```
 
 The dashboard defaults to same-origin API and WebSocket paths. For native Vite
@@ -197,7 +215,7 @@ $spatial.robots.Count
 
 The expected safety and shape values are schema `1.0`, `simulationOnly` equal to
 `True`, `physicalExecutionEnabled` equal to `False`, three floors, and three
-virtual robots. Open <http://localhost:3000>, select **Digital twin**, exercise
+virtual robots. Open <http://localhost:3006>, select **Digital twin**, exercise
 2D/3D mode, floor/all-floor selection, camera presets, zoom/reset, follow,
 layers, and robot/hazard selection, then start a simulation with **SIM** to
 observe sequenced fleet updates.

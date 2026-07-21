@@ -60,9 +60,19 @@ def dashboard_projection(project: ProjectDetail, *, audit_valid: bool) -> dict[s
         active_task = "Emergency stop engaged"
     mode = "PHYSICAL" if project.active_mode == "physical" else "SIMULATION"
     connection = "online"
-    if robot is None or robot.connection in {"stopped", "digital_twin_error"}:
+    if robot is None or robot.connection in {
+        "stopped",
+        "digital_twin_error",
+        "adapter_offline",
+    }:
         connection = "offline"
-    elif robot.connection in {"adapter_denied", "virtual_ready"}:
+    elif robot.connection in {
+        "adapter_denied",
+        "adapter_unconfigured",
+        "demo_available",
+        "spot_available",
+        "virtual_ready",
+    }:
         connection = "degraded"
 
     telemetry_groups: dict[str, list[float]] = defaultdict(list)

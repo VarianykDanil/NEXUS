@@ -16,7 +16,9 @@ The delivered scene contains:
 - three virtual robots with stable identifiers, roles, floor-aware 3D poses,
   heading, battery, speed, localization, mission, connection, and bounded trails;
 - 12 floor-aware mission checkpoints expanded into collision-checked paths
-  across all three floors.
+  across all three floors;
+- a continuous, closed-route virtual fleet stream at four updates per second by
+  default, with independent phase offsets and bounded recent trails.
 
 All distances are metres. The right-handed ENU frame uses `x` east, `y` north,
 and `z` up. Dashboard yaw is expressed in degrees. Consumers must use the frame
@@ -81,6 +83,28 @@ metric `x/y`, yaw, battery, and speed, or hazard floor, position, type, severity
 and confidence. The fleet list provides a keyboard-accessible alternative to
 selecting objects directly in the graphics view.
 
+### Selecting a job destination
+
+The full Digital twin page includes a memory-backed job composer. Pressing
+**Choose on map** forces the 2D single-floor view and changes the cursor to a
+targeting crosshair. The selected SVG point is inverse-projected into metric
+`building_enu` coordinates and labeled with its containing room. The API then
+validates the coordinate, snaps it to a navigable point, chooses a robot, and
+replans the route from canonical geometry. Text-only jobs can resolve a named
+room directly from persistent spatial memory. See
+[Memory-backed robot jobs](robot-jobs.md) for the full contract.
+
+### Continuous demo motion
+
+Eligible projects start a continuous virtual motion worker automatically. The
+**Virtual fleet motion** control exposes live/stopped state, moving robot count,
+update rate, speed multiplier, and start/stop actions. It uses the same
+sequenced WebSocket as mission updates and remains active while robot-job stages
+execute. Mission simulation and physical or emergency-stop transitions take
+exclusive ownership and cancel it safely. See
+[Continuous virtual fleet motion](demo-motion.md) for configuration and API
+details.
+
 ## REST spatial snapshot
 
 `GET /api/v1/projects/{project_id}/spatial` returns the read-only canonical
@@ -122,7 +146,7 @@ Invoke-RestMethod "http://localhost:8000/api/v1/projects/$id/spatial" |
 ## Sequenced WebSocket stream
 
 Connect to `WS /ws/projects/{project_id}`. Through Compose, browser clients use
-the same-origin path `ws://localhost:3000/ws/projects/{project_id}`; direct API
+the same-origin path `ws://localhost:3006/ws/projects/{project_id}`; direct API
 clients may use port 8000.
 
 The server subscribes before constructing the first authoritative snapshot, so
@@ -163,6 +187,7 @@ During simulation the relevant spatial events are:
 | `simulation.started` | Simulation state transition |
 | `simulation.progress` | Legacy-compatible progress plus floor-aware `x/y/z/yaw/floorId` pose |
 | `robots.state.updated` | Full replacement state for all three robots plus dynamic floor coverage, per-room explored percentage, hazards, and paths; static room/wall/door/connector geometry is not repeated |
+| `demo.motion.started` / `demo.motion.stopped` | Simulation-only worker lifecycle and configured frame rate |
 | `simulation.completed` | Final progress and pose; a final fleet event follows |
 | `safety.emergency_stop` | Critical, zero-speed stopped state |
 

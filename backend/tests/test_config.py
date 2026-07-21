@@ -23,8 +23,8 @@ def test_production_requires_a_unique_audit_signing_key(environment: str) -> Non
 
 def test_cors_origins_are_normalized_without_credentialed_wildcard_ambiguity() -> None:
     assert Settings().cors_origin_list == [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
+        "http://localhost:3006",
+        "http://127.0.0.1:3006",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
@@ -57,3 +57,35 @@ def test_openai_settings_are_optional_bounded_and_secret_safe() -> None:
         Settings(openai_model="   ")
     with pytest.raises(ValidationError):
         Settings(openai_timeout_seconds=0.5)
+
+
+def test_robot_link_defaults_to_demo_and_spot_password_stays_secret() -> None:
+    assert Settings().robot_adapter == "demo"
+
+    configured = Settings(
+        robot_adapter="spot",
+        spot_hostname="192.168.80.3",
+        spot_username="nexus-demo",
+        spot_password="spot-secret",
+    )
+    assert configured.spot_password_value == "spot-secret"
+    assert "spot-secret" not in repr(configured)
+
+    with pytest.raises(ValidationError):
+        Settings(robot_adapter="unknown")
+
+
+def test_continuous_demo_motion_defaults_are_live_and_bounded() -> None:
+    settings = Settings()
+    assert settings.demo_motion_autostart is True
+    assert settings.demo_motion_frame_interval_seconds == 0.25
+    assert settings.demo_motion_speed_multiplier == 1.0
+
+    with pytest.raises(ValidationError):
+        Settings(demo_motion_frame_interval_seconds=0.05)
+    with pytest.raises(ValidationError):
+        Settings(demo_motion_frame_interval_seconds=2.1)
+    with pytest.raises(ValidationError):
+        Settings(demo_motion_speed_multiplier=0)
+    with pytest.raises(ValidationError):
+        Settings(demo_motion_speed_multiplier=4.1)

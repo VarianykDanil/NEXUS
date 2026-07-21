@@ -183,6 +183,115 @@ class EmergencyStopResponse(BaseModel):
     hardware_command_sent: Literal[False] = False
 
 
+class RobotCameraSourceRead(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=200)
+    width: int = Field(ge=1, le=16384)
+    height: int = Field(ge=1, le=16384)
+
+
+class RobotLinkStatus(BaseModel):
+    adapter: Literal["demo", "spot", "disabled"]
+    configured: bool
+    connected: bool
+    read_only: Literal[True] = True
+    robot_name: str | None = None
+    serial_number: str | None = None
+    software_version: str | None = None
+    battery_percent: float | None = Field(default=None, ge=0, le=100)
+    camera_sources: list[RobotCameraSourceRead]
+    last_seen_at: datetime | None = None
+    message: str
+
+
+class RobotLinkConnectResponse(BaseModel):
+    status: RobotLinkStatus
+    message: str
+    hardware_command_sent: Literal[False] = False
+
+
+class DemoMotionStatus(BaseModel):
+    enabled: bool
+    running: bool
+    simulation_only: Literal[True] = True
+    frame_interval_seconds: float = Field(ge=0.1, le=2.0)
+    speed_multiplier: float = Field(ge=0.1, le=4.0)
+    message: str
+    hardware_command_sent: Literal[False] = False
+
+
+class DemoMotionCommand(RequestModel):
+    requested_by: str = Field(default="dashboard.operator", min_length=2, max_length=120)
+
+
+class RobotJobTargetRequest(BaseModel):
+    floor_id: str = Field(min_length=1, max_length=80)
+    x: float = Field(ge=0, le=1000, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1000, allow_inf_nan=False)
+    room_id: str | None = Field(default=None, max_length=100)
+    room_label: str | None = Field(default=None, max_length=160)
+
+
+class RobotJobCreate(RequestModel):
+    instruction: str = Field(min_length=8, max_length=2000)
+    execution_mode: Literal["simulation", "physical"] = "simulation"
+    requested_by: str = Field(default="dashboard.operator", min_length=2, max_length=120)
+    target: RobotJobTargetRequest | None = None
+
+
+class RobotJobStepRead(BaseModel):
+    id: str
+    title: str
+    detail: str
+    status: Literal["queued", "running", "completed", "blocked", "failed"]
+    capability: str
+    evidence: str | None = None
+
+
+class RobotJobRead(APIModel):
+    id: str
+    project_id: str
+    instruction: str
+    status: Literal["planned", "running", "completed", "blocked", "failed", "cancelled"]
+    execution_mode: Literal["simulation", "physical"]
+    risk: Literal["low", "medium", "high", "critical"]
+    requested_by: str
+    assigned_robot_id: str
+    assigned_robot_name: str
+    target_floor_id: str
+    target_room_id: str | None
+    target_room_label: str | None
+    target_x: float
+    target_y: float
+    progress: float = Field(ge=0, le=100)
+    memory_context: dict[str, Any]
+    steps: list[RobotJobStepRead]
+    result: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class RobotJobExecuteResponse(BaseModel):
+    job: RobotJobRead
+    message: str
+    hardware_command_sent: Literal[False] = False
+
+
+class RobotMemoryRead(APIModel):
+    id: str
+    project_id: str
+    key: str
+    kind: Literal["location", "procedure", "experience"]
+    label: str
+    content: dict[str, Any]
+    confidence: float = Field(ge=0, le=1)
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class EngineeringReviewReadiness(StrEnum):
     BLOCKED = "blocked"
     NEEDS_WORK = "needs_work"

@@ -20,23 +20,32 @@ from nexus_api.ai_review import (
 from nexus_api.audit import append_audit_entry, verify_project_audit
 from nexus_api.config import Settings
 from nexus_api.events import EventBroker
+from nexus_api.job_planner import (
+    location_memory_records,
+    plan_robot_job,
+    procedure_memory_records,
+)
 from nexus_api.models import (
     Approval,
     ArchitectureComponent,
     AuditEntry,
     Project,
     Requirement,
+    RobotJob,
+    RobotMemory,
     RobotState,
     Task,
     Telemetry,
     utc_now,
 )
 from nexus_api.planner import decompose_objective
+from nexus_api.robot_adapter import RobotAdapter, RobotAdapterError
 from nexus_api.schemas import (
     ApprovalRead,
     ArchitectureComponentRead,
     AuditEntryRead,
     AuditVerification,
+    DemoMotionStatus,
     EngineeringFindingDomain,
     EngineeringFindingSeverity,
     EngineeringReviewContent,
@@ -44,11 +53,21 @@ from nexus_api.schemas import (
     ProjectDetail,
     ProjectSummary,
     RequirementRead,
+    RobotJobCreate,
+    RobotJobRead,
+    RobotLinkStatus,
+    RobotMemoryRead,
     RobotStateRead,
+    SpatialSnapshotRead,
     TaskRead,
     TelemetryRead,
 )
-from nexus_api.spatial import build_spatial_snapshot
+from nexus_api.spatial import (
+    FLOOR_HEIGHT_M,
+    FLOOR_IDS,
+    build_demo_motion_snapshot,
+    build_spatial_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 PROJECT_LOCK_STRIPES = 64
@@ -59,6 +78,10 @@ class ProjectNotFoundError(LookupError):
 
 
 class ApprovalNotFoundError(LookupError):
+    pass
+
+
+class RobotJobNotFoundError(LookupError):
     pass
 
 
@@ -90,12 +113,19 @@ class NexusService:
         session_factory: async_sessionmaker[AsyncSession],
         events: EventBroker,
         engineering_review_provider: EngineeringReviewProvider | None = None,
+        robot_adapter: RobotAdapter | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.events = events
         self._engineering_review_provider = engineering_review_provider
+        if robot_adapter is None:
+            raise ValueError("NexusService requires a robot adapter")
+        self.robot_adapter = robot_adapter
         self._simulation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._demo_motion_tasks: dict[str, asyncio.Task[None]] = {}
+        self._job_tasks: dict[str, asyncio.Task[None]] = {}
+        self._job_projects: dict[str, str] = {}
         # Serializes audit-bearing transactions per project inside one API process.
         # PostgreSQL deployments with multiple API replicas should additionally use
         # an audit-head row locked with SELECT FOR UPDATE (documented in README).
@@ -335,6 +365,8 @@ class NexusService:
         await self.events.publish(
             project.id, "project.created", {"project": detail.model_dump(mode="json")}
         )
+        if self.settings.demo_motion_autostart and actor != "system.seed":
+            self._start_demo_motion_task(project.id, detail)
         return detail
 
     async def seed_demo_if_empty(self) -> None:
@@ -497,6 +529,7 @@ class NexusService:
         self, project_id: str, *, requested_by: str
     ) -> tuple[ProjectDetail, None, str]:
         await self._cancel_simulation(project_id)
+        await self._cancel_demo_motion(project_id)
         async with self.session_factory() as session:
             project = await self._load_project(session, project_id)
             if project.status == "emergency_stopped" or (
@@ -543,6 +576,7 @@ class NexusService:
         self, project_id: str, *, requested_by: str
     ) -> tuple[ProjectDetail, ApprovalRead, str]:
         await self._cancel_simulation(project_id)
+        await self._cancel_demo_motion(project_id)
         async with self.session_factory() as session:
             project = await self._load_project(session, project_id)
             if project.status == "emergency_stopped" or (
@@ -586,7 +620,11 @@ class NexusService:
             project.status = "awaiting_approval"
             project.active_mode = "physical"
             if project.robot_state is not None:
-                project.robot_state.connection = "adapter_denied"
+                project.robot_state.connection = (
+                    f"{self.robot_adapter.kind}_available"
+                    if self.robot_adapter.configured
+                    else "adapter_unconfigured"
+                )
                 project.robot_state.mode = "safety_locked"
                 project.robot_state.velocity = 0.0
                 project.robot_state.last_seen_at = utc_now()
@@ -605,7 +643,7 @@ class NexusService:
         return (
             detail,
             approval_read,
-            "Human approval is required. The physical adapter remains denied.",
+            "Human approval is required before the configured robot link can become active.",
         )
 
     async def decide_approval(
@@ -628,12 +666,19 @@ class NexusService:
         async with self._lock_for_project(project_id):
             if decision == "approved":
                 await self._cancel_simulation(project_id)
+            robot_link: RobotLinkStatus | None = None
+            if decision == "approved":
+                try:
+                    robot_link = await self.robot_adapter.connect()
+                except RobotAdapterError:
+                    robot_link = await self.robot_adapter.status()
             return await self._decide_approval_unlocked(
                 approval_id,
                 decision,
                 decided_by=decided_by,
                 comment=comment,
                 expected_project_id=expected_project_id,
+                robot_link=robot_link,
             )
 
     async def _decide_approval_unlocked(
@@ -644,6 +689,7 @@ class NexusService:
         decided_by: str,
         comment: str | None,
         expected_project_id: str | None = None,
+        robot_link: RobotLinkStatus | None = None,
     ) -> tuple[ProjectDetail, ApprovalRead, str]:
         async with self.session_factory() as session:
             approval = await session.get(Approval, approval_id)
@@ -672,17 +718,33 @@ class NexusService:
                 project.status = "physical_ready"
                 project.active_mode = "physical"
                 if project.robot_state is not None:
-                    project.robot_state.connection = "adapter_denied"
-                    project.robot_state.mode = "physical_ready_safe"
+                    project.robot_state.connection = (
+                        f"{robot_link.adapter}_connected"
+                        if robot_link is not None and robot_link.connected
+                        else "adapter_offline"
+                    )
+                    project.robot_state.mode = (
+                        "physical_observe"
+                        if robot_link is not None and robot_link.connected
+                        else "physical_ready_safe"
+                    )
                     project.robot_state.velocity = 0.0
+                    if robot_link is not None and robot_link.battery_percent is not None:
+                        project.robot_state.battery_percent = robot_link.battery_percent
                     project.robot_state.last_seen_at = utc_now()
                 for task in project.tasks:
                     if task.requires_approval:
                         task.status = "ready"
-                message = (
-                    "Approval recorded. Project is ready for a future hardware adapter, "
-                    "but this MVP sent no physical command."
-                )
+                if robot_link is not None and robot_link.connected:
+                    message = (
+                        f"Approval recorded. {robot_link.robot_name or robot_link.adapter} is "
+                        "connected for live telemetry and cameras; no motion command was sent."
+                    )
+                else:
+                    message = (
+                        "Approval recorded, but the robot link is offline. No physical command "
+                        "was sent."
+                    )
             else:
                 project.status = "approval_rejected"
                 project.active_mode = None
@@ -706,6 +768,8 @@ class NexusService:
                 details={
                     "requested_action": approval.action,
                     "comment": comment,
+                    "robot_adapter": robot_link.adapter if robot_link is not None else None,
+                    "robot_connected": robot_link.connected if robot_link is not None else False,
                     "hardware_command_sent": False,
                 },
                 audit_hmac_key=self.settings.audit_hmac_key,
@@ -725,6 +789,386 @@ class NexusService:
         )
         return detail, approval_read, message
 
+    async def record_robot_link(
+        self,
+        project_id: str,
+        status: RobotLinkStatus,
+        *,
+        actor: str = "dashboard.operator",
+    ) -> ProjectDetail:
+        """Persist a read-only edge connection without granting motion authority."""
+
+        async with self._lock_for_project(project_id):
+            async with self.session_factory() as session:
+                project = await self._load_project(session, project_id)
+                if project.robot_state is not None:
+                    project.robot_state.connection = (
+                        f"{status.adapter}_connected" if status.connected else "adapter_offline"
+                    )
+                    if status.battery_percent is not None:
+                        project.robot_state.battery_percent = status.battery_percent
+                    project.robot_state.last_seen_at = utc_now()
+                await append_audit_entry(
+                    session,
+                    project_id=project.id,
+                    actor=actor,
+                    action="robot.link_connected",
+                    entity_type="robot_adapter",
+                    entity_id=project.id,
+                    details={
+                        "adapter": status.adapter,
+                        "read_only": status.read_only,
+                        "robot_name": status.robot_name,
+                        "camera_sources": [source.name for source in status.camera_sources],
+                        "hardware_command_sent": False,
+                    },
+                    audit_hmac_key=self.settings.audit_hmac_key,
+                )
+                await session.commit()
+
+            detail = await self.get_project(project_id)
+            await self.events.publish(
+                project_id,
+                "robot.link_connected",
+                {
+                    "adapter": status.adapter,
+                    "connected": status.connected,
+                    "read_only": True,
+                    "hardware_command_sent": False,
+                },
+            )
+            return detail
+
+    async def _ensure_robot_memory(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        spatial: Any,
+    ) -> None:
+        existing = await session.scalar(
+            select(func.count(RobotMemory.id)).where(RobotMemory.project_id == project_id)
+        )
+        if existing:
+            return
+        records = [*location_memory_records(spatial), *procedure_memory_records()]
+        session.add_all(
+            [RobotMemory(project_id=project_id, **record) for record in records]
+        )
+
+    async def list_robot_memory(self, project_id: str) -> list[RobotMemoryRead]:
+        async with self._lock_for_project(project_id):
+            detail = await self.get_project(project_id)
+            spatial = build_spatial_snapshot(detail)
+            async with self.session_factory() as session:
+                await self._ensure_robot_memory(session, project_id, spatial)
+                await session.commit()
+                memories = list(
+                    (
+                        await session.scalars(
+                            select(RobotMemory)
+                            .where(RobotMemory.project_id == project_id)
+                            .order_by(RobotMemory.kind, RobotMemory.label)
+                        )
+                    ).all()
+                )
+        return [RobotMemoryRead.model_validate(memory) for memory in memories]
+
+    async def create_robot_job(
+        self, project_id: str, payload: RobotJobCreate
+    ) -> RobotJobRead:
+        async with self._lock_for_project(project_id):
+            detail = await self.get_project(project_id)
+            if detail.status == "emergency_stopped" or (
+                detail.robot_state is not None and detail.robot_state.emergency_stopped
+            ):
+                raise StateConflictError("Emergency stop is latched; a job cannot be planned")
+            spatial = build_spatial_snapshot(detail)
+            try:
+                planned = plan_robot_job(spatial, payload.instruction, payload.target)
+            except ValueError as exc:
+                raise StateConflictError(str(exc)) from exc
+
+            async with self.session_factory() as session:
+                await self._ensure_robot_memory(session, project_id, spatial)
+                job = RobotJob(
+                    project_id=project_id,
+                    instruction=payload.instruction,
+                    execution_mode=payload.execution_mode,
+                    risk=planned.risk,
+                    requested_by=payload.requested_by,
+                    assigned_robot_id=planned.assigned_robot_id,
+                    assigned_robot_name=planned.assigned_robot_name,
+                    target_floor_id=planned.target_floor_id,
+                    target_room_id=planned.target_room_id,
+                    target_room_label=planned.target_room_label,
+                    target_x=planned.target_x,
+                    target_y=planned.target_y,
+                    memory_context=planned.memory_context,
+                    steps=planned.steps,
+                )
+                session.add(job)
+                await session.flush()
+                await append_audit_entry(
+                    session,
+                    project_id=project_id,
+                    actor=payload.requested_by,
+                    action="robot.job.planned",
+                    entity_type="robot_job",
+                    entity_id=job.id,
+                    details={
+                        "instruction": payload.instruction,
+                        "execution_mode": payload.execution_mode,
+                        "assigned_robot_id": planned.assigned_robot_id,
+                        "target_floor_id": planned.target_floor_id,
+                        "target_room_id": planned.target_room_id,
+                        "target_x": planned.target_x,
+                        "target_y": planned.target_y,
+                        "matched_memory_keys": planned.memory_context[
+                            "matched_memory_keys"
+                        ],
+                        "route_distance_metres": planned.memory_context[
+                            "route_distance_metres"
+                        ],
+                        "hardware_command_sent": False,
+                    },
+                    audit_hmac_key=self.settings.audit_hmac_key,
+                )
+                await session.commit()
+                response = RobotJobRead.model_validate(job)
+
+        await self.events.publish(
+            project_id,
+            "robot.job.planned",
+            {"job": response.model_dump(mode="json"), "hardware_command_sent": False},
+        )
+        return response
+
+    async def list_robot_jobs(self, project_id: str) -> list[RobotJobRead]:
+        async with self.session_factory() as session:
+            await self._ensure_project_exists(session, project_id)
+            jobs = list(
+                (
+                    await session.scalars(
+                        select(RobotJob)
+                        .where(RobotJob.project_id == project_id)
+                        .order_by(RobotJob.created_at.desc())
+                    )
+                ).all()
+            )
+        return [RobotJobRead.model_validate(job) for job in jobs]
+
+    async def get_robot_job(self, project_id: str, job_id: str) -> RobotJobRead:
+        async with self.session_factory() as session:
+            job = (
+                await session.scalars(
+                    select(RobotJob).where(
+                        RobotJob.id == job_id, RobotJob.project_id == project_id
+                    )
+                )
+            ).one_or_none()
+        if job is None:
+            raise RobotJobNotFoundError(job_id)
+        return RobotJobRead.model_validate(job)
+
+    async def execute_robot_job(self, project_id: str, job_id: str) -> RobotJobRead:
+        async with self._lock_for_project(project_id):
+            async with self.session_factory() as session:
+                project = await self._load_project(session, project_id)
+                job = (
+                    await session.scalars(
+                        select(RobotJob).where(
+                            RobotJob.id == job_id, RobotJob.project_id == project_id
+                        )
+                    )
+                ).one_or_none()
+                if job is None:
+                    raise RobotJobNotFoundError(job_id)
+                if job.status != "planned":
+                    raise StateConflictError(
+                        f"Job {job.id} cannot start from status {job.status}"
+                    )
+                if project.status == "emergency_stopped" or (
+                    project.robot_state is not None and project.robot_state.emergency_stopped
+                ):
+                    raise StateConflictError("Emergency stop is latched; the job cannot start")
+                if job.execution_mode == "physical":
+                    raise StateConflictError(
+                        "Physical job execution requires a certified command adapter; "
+                        "run this job in simulation"
+                    )
+
+                steps = [dict(step) for step in job.steps]
+                if steps:
+                    steps[0]["status"] = "running"
+                job.steps = steps
+                job.status = "running"
+                job.started_at = utc_now()
+                job.progress = 0.0
+                if project.robot_state is not None:
+                    project.robot_state.mode = "job_simulation"
+                    project.robot_state.connection = "digital_twin_connected"
+                    project.robot_state.last_seen_at = utc_now()
+                await append_audit_entry(
+                    session,
+                    project_id=project_id,
+                    actor="dashboard.operator",
+                    action="robot.job.started",
+                    entity_type="robot_job",
+                    entity_id=job.id,
+                    details={
+                        "execution_mode": "simulation",
+                        "assigned_robot_id": job.assigned_robot_id,
+                        "hardware_command_sent": False,
+                    },
+                    audit_hmac_key=self.settings.audit_hmac_key,
+                )
+                await session.commit()
+                response = RobotJobRead.model_validate(job)
+
+            self._start_robot_job(project_id, job_id)
+
+        await self.events.publish(
+            project_id,
+            "robot.job.started",
+            {"job": response.model_dump(mode="json"), "hardware_command_sent": False},
+        )
+        return response
+
+    def _start_robot_job(self, project_id: str, job_id: str) -> None:
+        task = asyncio.create_task(self._run_robot_job(project_id, job_id))
+        self._job_tasks[job_id] = task
+        self._job_projects[job_id] = project_id
+
+        def discard(done: asyncio.Task[None]) -> None:
+            if self._job_tasks.get(job_id) is done:
+                self._job_tasks.pop(job_id, None)
+                self._job_projects.pop(job_id, None)
+
+        task.add_done_callback(discard)
+
+    async def _run_robot_job(self, project_id: str, job_id: str) -> None:
+        try:
+            job = await self.get_robot_job(project_id, job_id)
+            step_count = len(job.steps)
+            for index in range(step_count):
+                await asyncio.sleep(self.settings.simulation_step_delay_seconds)
+                async with self._lock_for_project(project_id):
+                    async with self.session_factory() as session:
+                        stored = await session.get(RobotJob, job_id)
+                        if stored is None or stored.status != "running":
+                            return
+                        steps = [dict(step) for step in stored.steps]
+                        steps[index]["status"] = "completed"
+                        steps[index]["evidence"] = (
+                            f"Simulation evidence recorded for {steps[index]['capability']}."
+                        )
+                        if index + 1 < step_count:
+                            steps[index + 1]["status"] = "running"
+                        stored.steps = steps
+                        stored.progress = round(((index + 1) / step_count) * 100, 1)
+                        completed = index + 1 == step_count
+                        if completed:
+                            stored.status = "completed"
+                            stored.completed_at = utc_now()
+                            stored.result = {
+                                "outcome": "completed_in_simulation",
+                                "summary": (
+                                    f"{stored.assigned_robot_name} completed the planned job at "
+                                    f"{stored.target_room_label or stored.target_floor_id}."
+                                ),
+                                "target": {
+                                    "floor_id": stored.target_floor_id,
+                                    "room_id": stored.target_room_id,
+                                    "x": stored.target_x,
+                                    "y": stored.target_y,
+                                },
+                                "hardware_command_sent": False,
+                            }
+                            project = await self._load_project(session, project_id)
+                            if project.robot_state is not None:
+                                project.robot_state.pose_x = stored.target_x
+                                project.robot_state.pose_y = stored.target_y
+                                project.robot_state.pose_z = (
+                                    FLOOR_IDS.index(stored.target_floor_id) * FLOOR_HEIGHT_M
+                                    if stored.target_floor_id in FLOOR_IDS
+                                    else 0.0
+                                )
+                                project.robot_state.velocity = 0.0
+                                project.robot_state.mode = "job_simulation_complete"
+                                project.robot_state.last_seen_at = utc_now()
+                            session.add(
+                                RobotMemory(
+                                    project_id=project_id,
+                                    key=f"experience:{stored.id}",
+                                    kind="experience",
+                                    label=f"Completed: {stored.instruction[:120]}",
+                                    content={
+                                        "job_id": stored.id,
+                                        "instruction": stored.instruction,
+                                        "assigned_robot_id": stored.assigned_robot_id,
+                                        "target_floor_id": stored.target_floor_id,
+                                        "target_room_id": stored.target_room_id,
+                                        "result": stored.result,
+                                    },
+                                    confidence=0.9,
+                                    source="completed-simulation-job",
+                                )
+                            )
+                            await append_audit_entry(
+                                session,
+                                project_id=project_id,
+                                actor="simulation.job-runner",
+                                action="robot.job.completed",
+                                entity_type="robot_job",
+                                entity_id=stored.id,
+                                details={
+                                    "assigned_robot_id": stored.assigned_robot_id,
+                                    "target_floor_id": stored.target_floor_id,
+                                    "target_x": stored.target_x,
+                                    "target_y": stored.target_y,
+                                    "memory_updated": True,
+                                    "hardware_command_sent": False,
+                                },
+                                audit_hmac_key=self.settings.audit_hmac_key,
+                            )
+                        await session.commit()
+                        response = RobotJobRead.model_validate(stored)
+
+                await self.events.publish(
+                    project_id,
+                    "robot.job.completed" if completed else "robot.job.updated",
+                    {
+                        "job": response.model_dump(mode="json"),
+                        "hardware_command_sent": False,
+                    },
+                )
+            await self._resume_demo_motion_if_configured(project_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Robot job worker failed for job %s", job_id)
+            async with self._lock_for_project(project_id):
+                async with self.session_factory() as session:
+                    stored = await session.get(RobotJob, job_id)
+                    if stored is not None and stored.status == "running":
+                        stored.status = "failed"
+                        stored.result = {"error_type": type(exc).__name__}
+                        await session.commit()
+            await self._resume_demo_motion_if_configured(project_id)
+
+    async def _cancel_project_jobs(self, project_id: str) -> None:
+        matching = [
+            job_id for job_id, stored_project_id in self._job_projects.items()
+            if stored_project_id == project_id
+        ]
+        tasks = [self._job_tasks.pop(job_id) for job_id in matching]
+        for job_id in matching:
+            self._job_projects.pop(job_id, None)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def emergency_stop(
         self, project_id: str, *, actor: str = "dashboard.operator"
     ) -> ProjectDetail:
@@ -735,6 +1179,8 @@ class NexusService:
         self, project_id: str, *, actor: str = "dashboard.operator"
     ) -> ProjectDetail:
         await self._cancel_simulation(project_id)
+        await self._cancel_demo_motion(project_id)
+        await self._cancel_project_jobs(project_id)
         async with self.session_factory() as session:
             project = await self._load_project(session, project_id)
             already_stopped = project.status == "emergency_stopped"
@@ -748,6 +1194,19 @@ class NexusService:
             for task in project.tasks:
                 if task.status in {"running", "in_progress", "ready", "awaiting_approval"}:
                     task.status = "cancelled"
+            running_jobs = list(
+                (
+                    await session.scalars(
+                        select(RobotJob).where(
+                            RobotJob.project_id == project_id,
+                            RobotJob.status == "running",
+                        )
+                    )
+                ).all()
+            )
+            for job in running_jobs:
+                job.status = "cancelled"
+                job.result = {"reason": "emergency_stop", "hardware_command_sent": False}
             await append_audit_entry(
                 session,
                 project_id=project.id,
@@ -785,6 +1244,249 @@ class NexusService:
             },
         )
         return detail
+
+    def _demo_motion_is_running(self, project_id: str) -> bool:
+        task = self._demo_motion_tasks.get(project_id)
+        return task is not None and not task.done()
+
+    def _demo_motion_status_value(self, project_id: str) -> DemoMotionStatus:
+        running = self._demo_motion_is_running(project_id)
+        return DemoMotionStatus(
+            enabled=True,
+            running=running,
+            frame_interval_seconds=self.settings.demo_motion_frame_interval_seconds,
+            speed_multiplier=self.settings.demo_motion_speed_multiplier,
+            message=(
+                "Virtual fleet motion is streaming from collision-checked demo routes."
+                if running
+                else "Virtual fleet motion is stopped."
+            ),
+        )
+
+    async def get_demo_motion_status(self, project_id: str) -> DemoMotionStatus:
+        await self.get_project(project_id)
+        return self._demo_motion_status_value(project_id)
+
+    async def start_demo_motion(
+        self, project_id: str, *, actor: str = "dashboard.operator"
+    ) -> DemoMotionStatus:
+        async with self._lock_for_project(project_id):
+            project = await self.get_project(project_id)
+            if project.status == "emergency_stopped" or (
+                project.robot_state is not None and project.robot_state.emergency_stopped
+            ):
+                raise StateConflictError(
+                    "Emergency stop is latched; virtual demo motion cannot start"
+                )
+            if project.active_mode == "physical":
+                raise StateConflictError(
+                    "Virtual demo motion is paused while the project requests physical mode"
+                )
+            if project_id in self._simulation_tasks:
+                raise StateConflictError(
+                    "A mission simulation is already running; wait for it to complete"
+                )
+            if any(
+                stored_project_id == project_id
+                for stored_project_id in self._job_projects.values()
+            ):
+                raise StateConflictError(
+                    "A robot job simulation is already running; wait for it to complete"
+                )
+            if not self._demo_motion_is_running(project_id):
+                self._start_demo_motion_task(project_id, project)
+                async with self.session_factory() as session:
+                    stored = await self._load_project(session, project_id)
+                    await append_audit_entry(
+                        session,
+                        project_id=stored.id,
+                        actor=actor,
+                        action="demo.motion.started",
+                        entity_type="simulation",
+                        entity_id=stored.id,
+                        details={
+                            "frame_interval_seconds": (
+                                self.settings.demo_motion_frame_interval_seconds
+                            ),
+                            "speed_multiplier": self.settings.demo_motion_speed_multiplier,
+                            "simulation_only": True,
+                            "hardware_command_sent": False,
+                        },
+                        audit_hmac_key=self.settings.audit_hmac_key,
+                    )
+                    await session.commit()
+
+        status = self._demo_motion_status_value(project_id)
+        await self.events.publish(
+            project_id,
+            "demo.motion.started",
+            status.model_dump(mode="json"),
+        )
+        return status
+
+    async def stop_demo_motion(
+        self, project_id: str, *, actor: str = "dashboard.operator"
+    ) -> DemoMotionStatus:
+        async with self._lock_for_project(project_id):
+            project = await self.get_project(project_id)
+            was_running = self._demo_motion_is_running(project_id)
+            await self._cancel_demo_motion(project_id)
+            if was_running:
+                async with self.session_factory() as session:
+                    stored = await self._load_project(session, project_id)
+                    await append_audit_entry(
+                        session,
+                        project_id=stored.id,
+                        actor=actor,
+                        action="demo.motion.stopped",
+                        entity_type="simulation",
+                        entity_id=stored.id,
+                        details={
+                            "simulation_only": True,
+                            "hardware_command_sent": False,
+                        },
+                        audit_hmac_key=self.settings.audit_hmac_key,
+                    )
+                    await session.commit()
+
+        status = self._demo_motion_status_value(project_id)
+        spatial = build_spatial_snapshot(
+            project,
+            stream_id=self.events.stream_id,
+            event_sequence=self.events.current_sequence(project_id),
+        )
+        await self.events.publish(
+            project_id,
+            "robots.state.updated",
+            self._spatial_event_payload(spatial),
+        )
+        await self.events.publish(
+            project_id,
+            "demo.motion.stopped",
+            status.model_dump(mode="json"),
+        )
+        return status
+
+    async def autostart_demo_motion(self) -> None:
+        if not self.settings.demo_motion_autostart:
+            return
+        async with self.session_factory() as session:
+            project_ids = list((await session.scalars(select(Project.id))).all())
+        for project_id in project_ids:
+            try:
+                project = await self.get_project(project_id)
+            except ProjectNotFoundError:
+                continue
+            if project.status == "emergency_stopped" or project.active_mode == "physical":
+                continue
+            self._start_demo_motion_task(project_id, project)
+
+    def _start_demo_motion_task(
+        self, project_id: str, project: ProjectDetail
+    ) -> None:
+        if self._demo_motion_is_running(project_id):
+            return
+        task = asyncio.create_task(self._run_demo_motion(project_id, project))
+        self._demo_motion_tasks[project_id] = task
+
+        def discard(done: asyncio.Task[None]) -> None:
+            if self._demo_motion_tasks.get(project_id) is done:
+                self._demo_motion_tasks.pop(project_id, None)
+
+        task.add_done_callback(discard)
+
+    async def _cancel_demo_motion(self, project_id: str) -> None:
+        task = self._demo_motion_tasks.pop(project_id, None)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _resume_demo_motion_if_configured(self, project_id: str) -> None:
+        if not self.settings.demo_motion_autostart or self._demo_motion_is_running(project_id):
+            return
+        try:
+            project = await self.get_project(project_id)
+        except ProjectNotFoundError:
+            return
+        if project.status == "emergency_stopped" or project.active_mode == "physical":
+            return
+        self._start_demo_motion_task(project_id, project)
+
+    @staticmethod
+    def _spatial_event_payload(spatial: SpatialSnapshotRead) -> dict[str, Any]:
+        return {
+            "revision": spatial.revision,
+            "simulationOnly": True,
+            "physicalExecutionEnabled": False,
+            "robots": [
+                robot.model_dump(mode="json", by_alias=True) for robot in spatial.robots
+            ],
+            "floors": [
+                {
+                    "id": floor.id,
+                    "coverage": floor.coverage,
+                    "hazards": [
+                        hazard.model_dump(mode="json", by_alias=True)
+                        for hazard in floor.hazards
+                    ],
+                    "rooms": [
+                        {"id": room.id, "explored": room.explored}
+                        for room in floor.rooms
+                    ],
+                    "path": [
+                        point.model_dump(mode="json", by_alias=True)
+                        for point in floor.path
+                    ],
+                }
+                for floor in spatial.building.floors
+            ],
+        }
+
+    async def _run_demo_motion(
+        self, project_id: str, initial_project: ProjectDetail
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        project = initial_project
+        frame = 0
+        try:
+            while True:
+                if frame > 0 and frame % 80 == 0:
+                    project = await self.get_project(project_id)
+                    if (
+                        project.status == "emergency_stopped"
+                        or project.active_mode == "physical"
+                    ):
+                        return
+                elapsed = loop.time() - started_at
+                spatial = build_demo_motion_snapshot(
+                    project,
+                    elapsed,
+                    speed_multiplier=self.settings.demo_motion_speed_multiplier,
+                    stream_id=self.events.stream_id,
+                    event_sequence=self.events.current_sequence(project_id),
+                )
+                await self.events.publish(
+                    project_id,
+                    "robots.state.updated",
+                    self._spatial_event_payload(spatial),
+                )
+                frame += 1
+                await asyncio.sleep(self.settings.demo_motion_frame_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Demo motion worker failed for project %s", project_id)
+            await self.events.publish(
+                project_id,
+                "demo.motion.failed",
+                {
+                    "error_type": type(exc).__name__,
+                    "simulation_only": True,
+                    "hardware_command_sent": False,
+                },
+            )
 
     async def list_telemetry(self, project_id: str, limit: int) -> list[TelemetryRead]:
         async with self.session_factory() as session:
@@ -846,6 +1548,7 @@ class NexusService:
     async def _run_simulation_supervised(self, project_id: str) -> None:
         try:
             await self._run_simulation(project_id)
+            await self._resume_demo_motion_if_configured(project_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1191,8 +1894,15 @@ class NexusService:
         return True
 
     async def shutdown(self) -> None:
-        tasks = list(self._simulation_tasks.values())
+        tasks = [
+            *self._simulation_tasks.values(),
+            *self._demo_motion_tasks.values(),
+            *self._job_tasks.values(),
+        ]
         self._simulation_tasks.clear()
+        self._demo_motion_tasks.clear()
+        self._job_tasks.clear()
+        self._job_projects.clear()
         for task in tasks:
             task.cancel()
         if tasks:

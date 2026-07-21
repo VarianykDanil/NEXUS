@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,7 +26,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", validation_alias="NEXUS_LOG_LEVEL")
     cors_origins: str = Field(
         default=(
-            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:3006,http://127.0.0.1:3006,"
             "http://localhost:5173,http://127.0.0.1:5173"
         ),
         validation_alias="NEXUS_CORS_ORIGINS",
@@ -42,6 +43,22 @@ class Settings(BaseSettings):
         le=30,
         validation_alias="NEXUS_SIMULATION_STEP_DELAY_SECONDS",
     )
+    demo_motion_autostart: bool = Field(
+        default=True,
+        validation_alias="NEXUS_DEMO_MOTION_AUTOSTART",
+    )
+    demo_motion_frame_interval_seconds: float = Field(
+        default=0.25,
+        ge=0.1,
+        le=2.0,
+        validation_alias="NEXUS_DEMO_MOTION_FRAME_INTERVAL_SECONDS",
+    )
+    demo_motion_speed_multiplier: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=4.0,
+        validation_alias="NEXUS_DEMO_MOTION_SPEED_MULTIPLIER",
+    )
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(
         default="gpt-5.6",
@@ -54,6 +71,20 @@ class Settings(BaseSettings):
         ge=1,
         le=120,
         validation_alias="NEXUS_OPENAI_TIMEOUT_SECONDS",
+    )
+    robot_adapter: Literal["demo", "spot", "disabled"] = Field(
+        default="demo", validation_alias="NEXUS_ROBOT_ADAPTER"
+    )
+    spot_hostname: str = Field(default="", validation_alias="NEXUS_SPOT_HOSTNAME")
+    spot_username: str = Field(default="", validation_alias="NEXUS_SPOT_USERNAME")
+    spot_password: SecretStr | None = Field(
+        default=None, validation_alias="NEXUS_SPOT_PASSWORD"
+    )
+    spot_timeout_seconds: float = Field(
+        default=8.0,
+        ge=1,
+        le=30,
+        validation_alias="NEXUS_SPOT_TIMEOUT_SECONDS",
     )
 
     @field_validator("openai_model", mode="after")
@@ -101,6 +132,12 @@ class Settings(BaseSettings):
             return None
         value = self.openai_api_key.get_secret_value().strip()
         return value or None
+
+    @property
+    def spot_password_value(self) -> str:
+        if self.spot_password is None:
+            return ""
+        return self.spot_password.get_secret_value().strip()
 
 
 @lru_cache

@@ -134,6 +134,18 @@
   background: var(--cyan-soft, rgba(55, 226, 205, .1));
   font-size: .76rem;
 }
+.spatial-job-targeting-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--cyan, #37e2cd) 35%, transparent);
+  color: var(--cyan-bright, #6cf5e4);
+  background: color-mix(in srgb, var(--cyan, #37e2cd) 10%, var(--panel, #0a1720));
+  font-size: .78rem;
+  font-weight: 650;
+}
 
 .spatial-stage { position: relative; min-height: var(--spatial-stage-min-height); overflow: hidden; background: var(--bg, #050c12); }
 .spatial-loading { display: grid; place-items: center; min-height: var(--spatial-stage-min-height); color: var(--muted, #79909b); font-size: .82rem; }
@@ -148,6 +160,7 @@
   user-select: none;
 }
 .spatial-plan svg.is-dragging { cursor: grabbing; }
+.spatial-plan svg.is-job-targeting { cursor: crosshair; touch-action: none; }
 .spatial-hit-target { fill: transparent; stroke: none; pointer-events: all; }
 .spatial-plan-background { fill: var(--bg, #050c12); }
 .spatial-plan-grid-line { fill: none; stroke: var(--border, #19313d); stroke-width: .6; opacity: .62; }
@@ -198,6 +211,11 @@
 .spatial-robot-lidar { fill: var(--bg, #050c12); stroke: var(--text-strong, #f1f8fa); stroke-width: 1; }
 .spatial-robot-heading { fill: currentColor; color: var(--cyan-bright, #6cf5e4); }
 .spatial-robot.is-selected .spatial-robot-body, .spatial-robot:focus-visible .spatial-robot-body { stroke: var(--text-strong, #f1f8fa); stroke-width: 2.5; }
+.spatial-job-target { color: var(--cyan-bright, #6cf5e4); pointer-events: none; }
+.spatial-job-target > circle:not(.spatial-job-target-aura) { fill: var(--bg, #050c12); stroke: currentColor; stroke-width: 2.5; }
+.spatial-job-target-aura { fill: color-mix(in srgb, var(--cyan, #37e2cd) 12%, transparent); stroke: color-mix(in srgb, var(--cyan, #37e2cd) 62%, transparent); stroke-width: 1.4; stroke-dasharray: 4 3; }
+.spatial-job-target path { fill: none; stroke: currentColor; stroke-width: 1.4; }
+.spatial-job-target text { fill: currentColor; font-family: "Cascadia Code", ui-monospace, monospace; font-size: 11px; font-weight: 800; letter-spacing: .7px; }
 
 .spatial-floor-caption text { fill: var(--text-strong, #f1f8fa); font-family: "Cascadia Code", ui-monospace, monospace; font-size: 13px; font-weight: 750; letter-spacing: .7px; }
 .spatial-floor-caption .spatial-floor-caption-meta { fill: var(--muted, #79909b); font-size: 12px; font-weight: 550; letter-spacing: .1px; }

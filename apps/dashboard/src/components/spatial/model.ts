@@ -116,6 +116,12 @@ export interface SpatialLayers {
   connectors: boolean;
 }
 
+export interface MapJobTarget extends Vec2 {
+  floorId: string;
+  roomId?: string;
+  roomLabel?: string;
+}
+
 export const DEFAULT_SPATIAL_LAYERS: SpatialLayers = {
   rooms: true,
   labels: true,
@@ -130,5 +136,8 @@ export interface DigitalTwinViewportProps {
   activeRobotId?: string;
   streamStatus?: "connecting" | "live" | "demo";
   compact?: boolean;
+  jobTargeting?: boolean;
+  jobTarget?: MapJobTarget | null;
   onRobotSelect?: (id: string) => void;
+  onJobTargetSelect?: (target: MapJobTarget) => void;
 }

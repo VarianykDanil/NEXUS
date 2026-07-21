@@ -2,6 +2,7 @@ import { demoSnapshot } from "../data/demo";
 import type {
   ApprovalStatus,
   DashboardSnapshot,
+  DemoMotionStatus,
   EngineeringFindingDomain,
   EngineeringFindingSeverity,
   EngineeringReviewReadiness,
@@ -9,6 +10,10 @@ import type {
   OperatingMode,
   ProjectSummary,
   RealtimeEvent,
+  RobotJob,
+  RobotJobTarget,
+  RobotLinkStatus,
+  RobotMemory,
 } from "../types";
 
 type UnknownRecord = Record<string, unknown>;
@@ -283,6 +288,142 @@ export async function setOperatingMode(projectId: string, mode: OperatingMode): 
 export async function triggerEmergencyStop(projectId: string): Promise<CommandResponse> {
   const payload = await request<unknown>(`projects/${encodeURIComponent(projectId)}/emergency-stop`, { method: "POST" });
   return normalizeCommandResponse(payload);
+}
+
+function normalizeRobotLinkStatus(payload: unknown): RobotLinkStatus {
+  const root = camelize(unwrapPayload(payload));
+  if (!isRecord(root)
+    || !["demo", "spot", "disabled"].includes(String(root.adapter))
+    || typeof root.configured !== "boolean"
+    || typeof root.connected !== "boolean"
+    || root.readOnly !== true
+    || !Array.isArray(root.cameraSources)
+    || typeof root.message !== "string") {
+    throw new NexusApiError("NEXUS API returned an invalid robot-link status");
+  }
+  return root as unknown as RobotLinkStatus;
+}
+
+export async function fetchRobotLink(projectId: string, signal?: AbortSignal): Promise<RobotLinkStatus> {
+  const payload = await request<unknown>(`projects/${encodeURIComponent(projectId)}/robot-link`, { signal });
+  return normalizeRobotLinkStatus(payload);
+}
+
+export async function connectRobotLink(projectId: string): Promise<RobotLinkStatus> {
+  const payload = await request<unknown>(`projects/${encodeURIComponent(projectId)}/robot-link/connect`, { method: "POST" });
+  const root = camelize(unwrapPayload(payload));
+  if (!isRecord(root)) throw new NexusApiError("NEXUS API returned an invalid robot-link response");
+  return normalizeRobotLinkStatus(root.status);
+}
+
+export function getRobotCameraFrameUrl(projectId: string, source: string, nonce = 0): string {
+  return `${buildApiUrl(`projects/${encodeURIComponent(projectId)}/robot-link/cameras/${encodeURIComponent(source)}/frame`)}?frame=${nonce}`;
+}
+
+function normalizeDemoMotionStatus(payload: unknown): DemoMotionStatus {
+  const root = camelize(unwrapPayload(payload));
+  if (!isRecord(root)
+    || typeof root.enabled !== "boolean"
+    || typeof root.running !== "boolean"
+    || root.simulationOnly !== true
+    || typeof root.frameIntervalSeconds !== "number"
+    || typeof root.speedMultiplier !== "number"
+    || typeof root.message !== "string"
+    || root.hardwareCommandSent !== false) {
+    throw new NexusApiError("NEXUS API returned an invalid demo-motion status");
+  }
+  return root as unknown as DemoMotionStatus;
+}
+
+export async function fetchDemoMotionStatus(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<DemoMotionStatus> {
+  const payload = await request<unknown>(
+    `projects/${encodeURIComponent(projectId)}/demo-motion`,
+    { signal },
+  );
+  return normalizeDemoMotionStatus(payload);
+}
+
+async function setDemoMotion(
+  projectId: string,
+  action: "start" | "stop",
+): Promise<DemoMotionStatus> {
+  const payload = await request<unknown>(
+    `projects/${encodeURIComponent(projectId)}/demo-motion/${action}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ requested_by: "dashboard.operator" }),
+    },
+  );
+  return normalizeDemoMotionStatus(payload);
+}
+
+export function startDemoMotion(projectId: string): Promise<DemoMotionStatus> {
+  return setDemoMotion(projectId, "start");
+}
+
+export function stopDemoMotion(projectId: string): Promise<DemoMotionStatus> {
+  return setDemoMotion(projectId, "stop");
+}
+
+function normalizeRobotJob(payload: unknown): RobotJob {
+  const root = camelize(payload);
+  if (!isRecord(root)
+    || typeof root.id !== "string"
+    || !["planned", "running", "completed", "blocked", "failed", "cancelled"].includes(String(root.status))
+    || !Array.isArray(root.steps)
+    || !isRecord(root.memoryContext)
+    || !isRecord(root.result)) {
+    throw new NexusApiError("NEXUS API returned an invalid robot job");
+  }
+  return root as unknown as RobotJob;
+}
+
+export async function fetchRobotJobs(projectId: string, signal?: AbortSignal): Promise<RobotJob[]> {
+  const payload = await request<unknown>(`projects/${encodeURIComponent(projectId)}/jobs`, { signal });
+  if (!Array.isArray(payload)) throw new NexusApiError("NEXUS API returned an invalid robot job list");
+  return payload.map(normalizeRobotJob);
+}
+
+export async function fetchRobotMemory(projectId: string, signal?: AbortSignal): Promise<RobotMemory[]> {
+  const payload = camelize(await request<unknown>(`projects/${encodeURIComponent(projectId)}/robot-memory`, { signal }));
+  if (!Array.isArray(payload)) throw new NexusApiError("NEXUS API returned an invalid robot memory list");
+  return payload as RobotMemory[];
+}
+
+export async function createRobotJob(
+  projectId: string,
+  instruction: string,
+  target?: RobotJobTarget,
+  executionMode: "simulation" | "physical" = "simulation",
+): Promise<RobotJob> {
+  const payload = await request<unknown>(`projects/${encodeURIComponent(projectId)}/jobs`, {
+    method: "POST",
+    body: JSON.stringify({
+      instruction,
+      execution_mode: executionMode,
+      requested_by: "dashboard.operator",
+      target: target ? {
+        floor_id: target.floorId,
+        x: target.x,
+        y: target.y,
+        room_id: target.roomId,
+        room_label: target.roomLabel,
+      } : undefined,
+    }),
+  });
+  return normalizeRobotJob(payload);
+}
+
+export async function executeRobotJob(projectId: string, jobId: string): Promise<RobotJob> {
+  const payload = camelize(await request<unknown>(
+    `projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/execute`,
+    { method: "POST" },
+  ));
+  if (!isRecord(payload)) throw new NexusApiError("NEXUS API returned an invalid robot job response");
+  return normalizeRobotJob(payload.job);
 }
 
 export async function requestEngineeringReview(projectId: string): Promise<EngineeringReviewResponse> {

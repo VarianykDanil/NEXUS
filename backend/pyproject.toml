@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+spot = [
+  "bosdyn-client==5.1.4",
+]
 dev = [
   "httpx>=0.27,<1",
   "mypy>=1.13,<2",

@@ -20,7 +20,8 @@ def app(tmp_path: Path):
         openai_api_key=None,
         audit_hmac_key="test-audit-key",
         simulation_step_delay_seconds=0.005,
-        cors_origins="http://localhost:3000",
+        demo_motion_autostart=False,
+        cors_origins="http://localhost:3006",
     )
     return create_app(settings)
 

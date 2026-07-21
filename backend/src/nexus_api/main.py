@@ -10,7 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from nexus_api import __version__
 from nexus_api.ai_review import EngineeringReviewProvider
@@ -18,12 +18,15 @@ from nexus_api.config import Settings, get_settings
 from nexus_api.dashboard import dashboard_projection
 from nexus_api.database import create_database, initialize_database
 from nexus_api.events import EventBroker
+from nexus_api.robot_adapter import RobotAdapter, RobotAdapterError, create_robot_adapter
 from nexus_api.schemas import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     AuditEntryRead,
     AuditVerification,
     DashboardApprovalDecisionRequest,
+    DemoMotionCommand,
+    DemoMotionStatus,
     EmergencyStopResponse,
     EngineeringReviewRequest,
     EngineeringReviewResponse,
@@ -35,6 +38,12 @@ from nexus_api.schemas import (
     ProjectDetail,
     ProjectSummary,
     ReadinessResponse,
+    RobotJobCreate,
+    RobotJobExecuteResponse,
+    RobotJobRead,
+    RobotLinkConnectResponse,
+    RobotLinkStatus,
+    RobotMemoryRead,
     SpatialSnapshotRead,
     TelemetryRead,
 )
@@ -44,6 +53,7 @@ from nexus_api.service import (
     ApprovalNotFoundError,
     NexusService,
     ProjectNotFoundError,
+    RobotJobNotFoundError,
     StateConflictError,
 )
 from nexus_api.spatial import build_spatial_snapshot
@@ -56,6 +66,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     engineering_review_provider: EngineeringReviewProvider | None = None,
+    robot_adapter: RobotAdapter | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
     logging.basicConfig(
@@ -64,17 +75,20 @@ def create_app(
     )
     engine, session_factory = create_database(runtime_settings.database_url)
     events = EventBroker()
+    runtime_robot_adapter = robot_adapter or create_robot_adapter(runtime_settings)
     service = NexusService(
         runtime_settings,
         session_factory,
         events,
         engineering_review_provider=engineering_review_provider,
+        robot_adapter=runtime_robot_adapter,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await initialize_database(engine)
         await service.seed_demo_if_empty()
+        await service.autostart_demo_motion()
         try:
             yield
         finally:
@@ -99,6 +113,7 @@ def create_app(
     application.state.session_factory = session_factory
     application.state.service = service
     application.state.events = events
+    application.state.robot_adapter = runtime_robot_adapter
 
     origins = runtime_settings.cors_origin_list
     application.add_middleware(
@@ -116,6 +131,10 @@ def create_app(
     @application.exception_handler(ApprovalNotFoundError)
     async def approval_not_found(_: Request, exc: ApprovalNotFoundError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": f"Approval {exc} was not found"})
+
+    @application.exception_handler(RobotJobNotFoundError)
+    async def robot_job_not_found(_: Request, exc: RobotJobNotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": f"Robot job {exc} was not found"})
 
     @application.exception_handler(StateConflictError)
     async def state_conflict(_: Request, exc: StateConflictError) -> JSONResponse:
@@ -136,6 +155,10 @@ def create_app(
             status_code=502,
             content={"detail": "Engineering review provider could not complete the request"},
         )
+
+    @application.exception_handler(RobotAdapterError)
+    async def robot_adapter_error(_: Request, exc: RobotAdapterError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     @application.get(f"{API_PREFIX}/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
@@ -194,6 +217,124 @@ def create_app(
             project,
             stream_id=events.stream_id,
             event_sequence=events.current_sequence(project_id),
+        )
+
+    @application.get(
+        f"{API_PREFIX}/projects/{{project_id}}/robot-memory",
+        response_model=list[RobotMemoryRead],
+        tags=["robot jobs"],
+        summary="List persistent map, procedure, and experience memory",
+    )
+    async def get_robot_memory(project_id: str) -> list[RobotMemoryRead]:
+        return await service.list_robot_memory(project_id)
+
+    @application.get(
+        f"{API_PREFIX}/projects/{{project_id}}/jobs",
+        response_model=list[RobotJobRead],
+        tags=["robot jobs"],
+    )
+    async def list_robot_jobs(project_id: str) -> list[RobotJobRead]:
+        return await service.list_robot_jobs(project_id)
+
+    @application.post(
+        f"{API_PREFIX}/projects/{{project_id}}/jobs",
+        response_model=RobotJobRead,
+        status_code=201,
+        tags=["robot jobs"],
+        summary="Plan a text or map-targeted robot job from persistent memory",
+    )
+    async def create_robot_job(project_id: str, payload: RobotJobCreate) -> RobotJobRead:
+        return await service.create_robot_job(project_id, payload)
+
+    @application.post(
+        f"{API_PREFIX}/projects/{{project_id}}/jobs/{{job_id}}/execute",
+        response_model=RobotJobExecuteResponse,
+        status_code=202,
+        tags=["robot jobs"],
+        summary="Execute a planned job in the digital twin",
+    )
+    async def execute_robot_job(project_id: str, job_id: str) -> RobotJobExecuteResponse:
+        job = await service.execute_robot_job(project_id, job_id)
+        return RobotJobExecuteResponse(
+            job=job,
+            message="Job simulation started; no physical hardware command was sent.",
+        )
+
+    @application.get(
+        f"{API_PREFIX}/projects/{{project_id}}/robot-link",
+        response_model=RobotLinkStatus,
+        tags=["robot link"],
+        summary="Inspect the configured demo or Spot edge link",
+    )
+    async def get_robot_link(project_id: str) -> RobotLinkStatus:
+        await service.get_project(project_id)
+        return await runtime_robot_adapter.status()
+
+    @application.get(
+        f"{API_PREFIX}/projects/{{project_id}}/demo-motion",
+        response_model=DemoMotionStatus,
+        tags=["missions"],
+        summary="Inspect continuous simulation-only virtual fleet motion",
+    )
+    async def get_demo_motion(project_id: str) -> DemoMotionStatus:
+        return await service.get_demo_motion_status(project_id)
+
+    @application.post(
+        f"{API_PREFIX}/projects/{{project_id}}/demo-motion/start",
+        response_model=DemoMotionStatus,
+        tags=["missions"],
+        summary="Start smooth collision-checked virtual fleet motion",
+    )
+    async def start_demo_motion(
+        project_id: str, payload: DemoMotionCommand
+    ) -> DemoMotionStatus:
+        return await service.start_demo_motion(
+            project_id,
+            actor=payload.requested_by,
+        )
+
+    @application.post(
+        f"{API_PREFIX}/projects/{{project_id}}/demo-motion/stop",
+        response_model=DemoMotionStatus,
+        tags=["missions"],
+        summary="Stop virtual fleet motion without contacting hardware",
+    )
+    async def stop_demo_motion(
+        project_id: str, payload: DemoMotionCommand
+    ) -> DemoMotionStatus:
+        return await service.stop_demo_motion(
+            project_id,
+            actor=payload.requested_by,
+        )
+
+    @application.post(
+        f"{API_PREFIX}/projects/{{project_id}}/robot-link/connect",
+        response_model=RobotLinkConnectResponse,
+        tags=["robot link"],
+        summary="Connect read-only telemetry and camera services",
+    )
+    async def connect_robot_link(project_id: str) -> RobotLinkConnectResponse:
+        await service.get_project(project_id)
+        status = await runtime_robot_adapter.connect()
+        await service.record_robot_link(project_id, status)
+        return RobotLinkConnectResponse(
+            status=status,
+            message=status.message,
+        )
+
+    @application.get(
+        f"{API_PREFIX}/projects/{{project_id}}/robot-link/cameras/{{source}}/frame",
+        response_class=Response,
+        tags=["robot link"],
+        summary="Capture one current camera frame",
+    )
+    async def get_robot_camera_frame(project_id: str, source: str) -> Response:
+        await service.get_project(project_id)
+        frame = await runtime_robot_adapter.capture(source)
+        return Response(
+            content=frame.content,
+            media_type=frame.media_type,
+            headers={"Cache-Control": "no-store, max-age=0", "X-Content-Type-Options": "nosniff"},
         )
 
     @application.post(

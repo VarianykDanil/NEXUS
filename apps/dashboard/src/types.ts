@@ -81,6 +81,106 @@ export interface RobotState {
   status: HealthStatus;
 }
 
+export interface RobotCameraSource {
+  name: string;
+  label: string;
+  width: number;
+  height: number;
+}
+
+export interface RobotLinkStatus {
+  adapter: "demo" | "spot" | "disabled";
+  configured: boolean;
+  connected: boolean;
+  readOnly: true;
+  robotName: string | null;
+  serialNumber: string | null;
+  softwareVersion: string | null;
+  batteryPercent: number | null;
+  cameraSources: RobotCameraSource[];
+  lastSeenAt: string | null;
+  message: string;
+}
+
+export interface DemoMotionStatus {
+  enabled: boolean;
+  running: boolean;
+  simulationOnly: true;
+  frameIntervalSeconds: number;
+  speedMultiplier: number;
+  message: string;
+  hardwareCommandSent: false;
+}
+
+export interface RobotJobTarget {
+  floorId: string;
+  x: number;
+  y: number;
+  roomId?: string;
+  roomLabel?: string;
+}
+
+export type RobotJobStatus = "planned" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+
+export interface RobotJobStep {
+  id: string;
+  title: string;
+  detail: string;
+  status: "queued" | "running" | "completed" | "blocked" | "failed";
+  capability: string;
+  evidence: string | null;
+}
+
+export interface RobotJob {
+  id: string;
+  projectId: string;
+  instruction: string;
+  status: RobotJobStatus;
+  executionMode: "simulation" | "physical";
+  risk: "low" | "medium" | "high" | "critical";
+  requestedBy: string;
+  assignedRobotId: string;
+  assignedRobotName: string;
+  targetFloorId: string;
+  targetRoomId: string | null;
+  targetRoomLabel: string | null;
+  targetX: number;
+  targetY: number;
+  progress: number;
+  memoryContext: {
+    planner?: string;
+    mapFrame?: string;
+    mapRevision?: string;
+    targetResolution?: string;
+    matchedMemoryKeys?: string[];
+    procedure?: string;
+    knownHazardsOnFloor?: number;
+    routeDistanceMetres?: number;
+    route?: Array<{ floorId: string; x: number; y: number; yaw: number }>;
+    whyThisRobot?: string;
+    [key: string]: unknown;
+  };
+  steps: RobotJobStep[];
+  result: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface RobotMemory {
+  id: string;
+  projectId: string;
+  key: string;
+  kind: "location" | "procedure" | "experience";
+  label: string;
+  content: Record<string, unknown>;
+  confidence: number;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface MapRoom {
   id: string;
   label: string;

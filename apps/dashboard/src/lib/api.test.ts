@@ -1,6 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { demoSnapshot } from "../data/demo";
-import { buildApiUrl, getProjectSocketUrl, NexusApiError, normalizeDashboardSnapshot, requestEngineeringReview, setOperatingMode } from "./api";
+import {
+  buildApiUrl,
+  connectRobotLink,
+  createRobotJob,
+  executeRobotJob,
+  fetchDemoMotionStatus,
+  getProjectSocketUrl,
+  getRobotCameraFrameUrl,
+  NexusApiError,
+  normalizeDashboardSnapshot,
+  requestEngineeringReview,
+  setOperatingMode,
+  startDemoMotion,
+  stopDemoMotion,
+} from "./api";
 
 function engineeringReviewPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -91,6 +105,124 @@ describe("NEXUS API mapping", () => {
       approval: { id: "approval-1", requestedBy: "operator" },
     });
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ mode: "PHYSICAL" });
+  });
+
+  it("connects the read-only robot link and builds an encoded camera URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({
+        status: {
+          adapter: "demo",
+          configured: true,
+          connected: true,
+          read_only: true,
+          robot_name: "Demo Spot",
+          serial_number: "DEMO-001",
+          software_version: "sim-1",
+          battery_percent: 87,
+          camera_sources: [{ name: "front camera", label: "Front camera", width: 960, height: 540 }],
+          last_seen_at: "2026-07-20T12:00:00Z",
+          message: "Connected",
+        },
+        hardware_command_sent: false,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await connectRobotLink("project / 1");
+
+    expect(result).toMatchObject({ adapter: "demo", connected: true, readOnly: true });
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/project%20%2F%201\/robot-link\/connect$/);
+    expect(getRobotCameraFrameUrl("project / 1", "front camera", 42)).toBe(
+      "/api/v1/projects/project%20%2F%201/robot-link/cameras/front%20camera/frame?frame=42",
+    );
+  });
+
+  it("normalizes and controls the simulation-only continuous fleet feed", async () => {
+    const payload = (running: boolean) => ({
+      enabled: true,
+      running,
+      simulation_only: true,
+      frame_interval_seconds: 0.25,
+      speed_multiplier: 1,
+      message: running ? "Virtual fleet motion is streaming." : "Virtual fleet motion is stopped.",
+      hardware_command_sent: false,
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: vi.fn().mockResolvedValue(payload(true)) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: vi.fn().mockResolvedValue(payload(true)) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: vi.fn().mockResolvedValue(payload(false)) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const status = await fetchDemoMotionStatus("project / 1");
+    const started = await startDemoMotion("project / 1");
+    const stopped = await stopDemoMotion("project / 1");
+
+    expect(status).toMatchObject({
+      running: true,
+      simulationOnly: true,
+      frameIntervalSeconds: 0.25,
+      hardwareCommandSent: false,
+    });
+    expect(started.running).toBe(true);
+    expect(stopped.running).toBe(false);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      "/api/v1/projects/project%20%2F%201/demo-motion",
+      "/api/v1/projects/project%20%2F%201/demo-motion/start",
+      "/api/v1/projects/project%20%2F%201/demo-motion/stop",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      requested_by: "dashboard.operator",
+    });
+  });
+
+  it("creates a map-targeted job and executes the normalized simulation plan", async () => {
+    const jobPayload = {
+      id: "job-1",
+      project_id: "project-1",
+      instruction: "Inspect the lobby",
+      status: "planned",
+      execution_mode: "simulation",
+      risk: "medium",
+      requested_by: "dashboard.operator",
+      assigned_robot_id: "scout-1",
+      assigned_robot_name: "Scout One",
+      target_floor_id: "ground",
+      target_room_id: "lobby",
+      target_room_label: "Lobby",
+      target_x: 5,
+      target_y: 3,
+      progress: 0,
+      memory_context: { matched_memory_keys: ["location:ground:lobby"], route_distance_metres: 4.2 },
+      steps: [{ id: "understand", title: "Understand", detail: "Bound intent", status: "queued", capability: "intent", evidence: null }],
+      result: {},
+      created_at: "2026-07-20T12:00:00Z",
+      updated_at: "2026-07-20T12:00:00Z",
+      started_at: null,
+      completed_at: null,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 201, json: vi.fn().mockResolvedValue(jobPayload) })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 202,
+        json: vi.fn().mockResolvedValue({ job: { ...jobPayload, status: "running" }, hardware_command_sent: false }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const planned = await createRobotJob("project / 1", "Inspect the lobby", {
+      floorId: "ground", x: 5, y: 3, roomId: "lobby", roomLabel: "Lobby",
+    });
+    const running = await executeRobotJob("project / 1", planned.id);
+
+    expect(planned).toMatchObject({ assignedRobotName: "Scout One", targetRoomLabel: "Lobby" });
+    expect(running.status).toBe("running");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      execution_mode: "simulation",
+      target: { floor_id: "ground", room_id: "lobby", x: 5, y: 3 },
+    });
+    expect(String(fetchMock.mock.calls[1][0])).toMatch(/jobs\/job-1\/execute$/);
   });
 
   it("preserves server validation detail in a typed API error", async () => {
