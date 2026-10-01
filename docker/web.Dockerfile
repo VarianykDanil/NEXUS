@@ -21,7 +21,7 @@ ENV VITE_WS_BASE_URL=$VITE_WS_BASE_URL
 
 RUN pnpm --filter @nexus/dashboard build
 
-FROM nginxinc/nginx-unprivileged:1.30.3-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31.6-alpine AS runtime
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build --chown=101:101 /workspace/apps/dashboard/dist /usr/share/nginx/html
